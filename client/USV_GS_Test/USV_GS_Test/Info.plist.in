@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>USV_GS_Test</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.example.usv-gs-test</string>
+    <key>CFBundleExecutable</key>
+    <string>appUSV_GS_Test</string>
+    <key>CFBundleName</key>
+    <string>USV_GS_Test</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${PROJECT_VERSION}</string>
+    <key>CFBundleVersion</key>
+    <string>${PROJECT_VERSION}</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+
+    <!-- macOS 定位权限描述，供 HTML5 / Qt WebEngine geolocation 弹窗使用 -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>需要获取当前位置以在地图上显示无人船位置。</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>需要获取当前位置以在地图上显示无人船位置。</string>
+</dict>
+</plist>

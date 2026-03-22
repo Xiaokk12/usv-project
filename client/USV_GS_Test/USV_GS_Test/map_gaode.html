@@ -1,0 +1,2064 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Gaode Map</title>
+
+    <!-- 高德地图 JS API -->
+<script src="https://webapi.amap.com/maps?v=2.0&key=a26f59af94f119d4d6ab81c24d88f2ad"></script>
+<script src="qrc:/qtwebchannel/qwebchannel.js"></script>
+
+    <style>
+        html, body, #container {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        overflow: hidden;
+    }
+
+    .loc-marker {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: #f7d13c;
+        border: 3px solid #d19b00;
+        box-shadow: 0 0 8px rgba(0,0,0,0.35);
+    }
+
+        /* 右键菜单样式 */
+        #contextMenu {
+            position: absolute;
+            display: none;
+            list-style: none;
+            padding: 6px 0;
+            margin: 0;
+            width: 140px;
+            background: white;
+            border-radius: 6px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            z-index: 99999;
+        }
+        #contextMenu li {
+            padding: 8px 15px;
+            cursor: pointer;
+        }
+        #contextMenu li:hover {
+            background: #e6e6e6;
+        }
+    </style>
+</head>
+
+<body>
+    <!--<h1 style="color:red;position:absolute;z-index:999999;font-size:50px;">
+    TEST WORKS!
+    </h1>-->     <!--测试是否修改启效果-->
+
+<div id="container"></div>
+
+<!-- 路网图层按钮 -->
+<div id="toggleRoadNetBtn"
+     style="position:absolute;
+            top:10px;
+            right:10px;
+            z-index:9999;
+            background:white;
+            padding:8px 12px;
+            border-radius:6px;
+            cursor:pointer;
+            box-shadow:0 0 6px rgba(0,0,0,0.3);
+            user-select:none;">
+    显示航线：开启
+</div>
+
+<!-- 清除所有航线按钮 -->
+<div id="clearRoutesBtn"
+     style="position:absolute;
+            top:50px;
+            right:10px;
+            z-index:9999;
+            background:white;
+            padding:8px 12px;
+            border-radius:6px;
+            cursor:pointer;
+            box-shadow:0 0 6px rgba(0,0,0,0.3);
+            user-select:none;">
+    清除所有航线
+</div>
+
+<!-- 定位按钮 -->
+<div id="locateBtn"
+     style="position:absolute;
+            bottom:80px;
+            right:20px;
+            z-index:9999;
+            background:white;
+            padding:8px 12px;
+            border-radius:6px;
+            cursor:pointer;
+            box-shadow:0 0 6px rgba(0,0,0,0.3);
+            user-select:none;">
+    定位
+</div>
+
+<!-- ⭐ 右键菜单（放在 body 内） -->
+<ul id="contextMenu">
+    <li id="menuStartRoute">🚩 设置航线</li>
+</ul>
+
+<script>
+
+// ===========================
+// 1. Debug 面板（不依赖 DevTools）
+// ===========================
+let dbg = document.createElement("div");
+dbg.style =
+ "position:absolute;left:10px;top:10px;z-index:999999;" +
+ "background:white;padding:6px;border:1px solid #333;font-size:13px;";
+document.body.appendChild(dbg);
+
+// 内容区与按钮分离，避免 innerHTML 重置丢失事件
+let dbgHeader = document.createElement("div");
+dbgHeader.style = "display:flex;align-items:center;gap:8px;";
+let dbgTitle = document.createElement("span");
+dbgTitle.innerText = "DEBUG:";
+let dbgClearBtn = document.createElement("button");
+dbgClearBtn.innerText = "清空";
+dbgClearBtn.style = "padding:2px 6px;font-size:12px;cursor:pointer;";
+dbgHeader.appendChild(dbgTitle);
+dbgHeader.appendChild(dbgClearBtn);
+dbg.appendChild(dbgHeader);
+let dbgBody = document.createElement("div");
+dbgBody.innerHTML = "HTML loaded";
+dbg.appendChild(dbgBody);
+
+function debug(msg){
+    dbgBody.innerHTML += "<br>" + msg;
+}
+
+dbgClearBtn.onclick = function() {
+    dbgBody.innerHTML = "";
+};
+
+
+
+
+
+// -------------------------------
+// 3. 地图初始化（仅卫星底图，关闭路网）
+// -------------------------------
+let map = new AMap.Map("container", {
+    zoom: 15,
+    center: [110.3311, 20.0659],
+    layers: [
+        new AMap.TileLayer.Satellite()
+    ]
+});
+
+
+// -------------------------------
+// 4. 航线编辑逻辑
+// -------------------------------
+let routeEditMode = false;
+let routeMarkers = [];
+let polyline = null;
+let routeLabels = [];
+let routeVisible = true;
+let locationMarker = null;
+let selectionMode = false;
+let selectionMarkers = [];
+let selectionPolygon = null;
+let plannedPolyline = null;
+let plannedMarkers = [];
+let selectionLabels = [];
+let samplingMode = false;           // 是否正在选择采样点
+let samplingPoints = [];            // 已选择的采样点（按选取顺序存储）
+let lastBoatLocation = null; // 记录无人船 GPS 最近位置
+let autoReturnMarking = false; // 是否正在等待用户标记返航点
+let autoReturnLine = null;
+let autoReturnStartMarker = null;
+let autoReturnTargetMarker = null;
+let simTimer = null;
+let simPath = [];
+let simSpeed = 1.5; // m/s
+let simSpeedSetting = 1.5;
+let simSegIndex = 0;
+let simSegProgress = 0; // 已走过当前段的距离（米）
+let simLastTs = 0;
+let simMarker = null;
+let simPaused = false;
+let simStartMarking = false;
+let simStartMarker = null;
+let simPreviewLine = null;
+const SAMPLE_DURATION_PER_BOTTLE_MS = 5000;
+const PREP_DURATION_MS = 1000;
+const RINSE_DURATION_MS = 2000;
+const POST_DURATION_MS = 1000;
+const MANUAL_WAYPOINT_NEARBY_DISTANCE_METERS = 12;
+let simSamplingSettings = { bottlesPerPoint: 1, volumePerBottle: 0.5, depthMeters: 0.5 };
+let simSamplingPlan = [];
+let simSamplingActive = null;
+let simSamplingTimer = null;
+let simMode = "idle"; // route | return | idle
+let simLastSite = 1;
+const SHIP_ICON_HEADING_OFFSET = 90; // ship.png 默认朝向与航向相反，偏移到与 heading 同向
+let manualTimer = null;
+let manualLastTs = 0;
+let manualVector = { x: 0, y: 0 }; // x: 右为正；y: 前为正
+let manualSpeedLimit = 0;
+let manualActiveUntil = 0;
+let manualStatusLabel = null;
+const MANUAL_IDLE_TIMEOUT_MS = 1500;
+let samplingInfoWindow = null;
+let manualLastStatus = "";
+
+function formatEnvironmentInfo(env) {
+    if (!env || typeof env !== "object")
+        return "";
+    const keys = ["temperature", "salinity", "ph", "chlorophyll"];
+    const lines = [];
+    keys.forEach(function(key) {
+        const item = env[key];
+        if (item === undefined || item === null)
+            return;
+        let value = null;
+        let unitText = "";
+        let label = key;
+        let decimals = 2;
+        if (typeof item === "number") {
+            value = item;
+        } else if (typeof item === "object") {
+            if (Number.isFinite(item.value))
+                value = item.value;
+            if (typeof item.unit === "string" && item.unit.length)
+                unitText = " " + item.unit;
+            if (typeof item.label === "string" && item.label.length)
+                label = item.label;
+            if (typeof item.decimals === "number")
+                decimals = item.decimals;
+        }
+        if (!Number.isFinite(value))
+            return;
+        lines.push(label + ": " + value.toFixed(decimals) + unitText);
+    });
+    if (!lines.length)
+        return "";
+    return "环境参数:<br>" + lines.join("<br>") + "<br>";
+}
+
+function normalizeSamplingPoint(sp, idx) {
+    const fallbackIdx = (typeof idx === "number") ? idx : (typeof sp.index === "number" ? sp.index : 0);
+    const order = sp.order || sp.pointIndex || (fallbackIdx + 1);
+    const pointIndex = sp.pointIndex || (fallbackIdx + 1);
+    const site = sp.site || pointIndex;
+    const bottle = (typeof sp.bottle === "number") ? sp.bottle : 1;
+    const volume = (typeof sp.volume === "number") ? sp.volume : (simSamplingSettings.volumePerBottle || 0);
+    const depth = (typeof sp.depth === "number") ? sp.depth : (simSamplingSettings.depthMeters || 0);
+    const lng = (typeof sp.lng === "number") ? sp.lng : undefined;
+    const lat = (typeof sp.lat === "number") ? sp.lat : undefined;
+    const time = sp.time || "";
+    const env = sp.env;
+    return {
+        index: sp.index,
+        order: order,
+        pointIndex: pointIndex,
+        site: site,
+        bottle: bottle,
+        volume: volume,
+        depth: depth,
+        lng: lng,
+        lat: lat,
+        time: time,
+        env: env
+    };
+}
+
+const ROUTE_MARKER_ICON = "https://webapi.amap.com/images/marker_sprite.png";
+const PLANNED_MARKER_ICON = "https://webapi.amap.com/theme/v1.3/markers/n/mark_bs.png";
+const SAMPLING_MARKER_ICON = new AMap.Icon({
+    size: new AMap.Size(26, 36),
+    imageSize: new AMap.Size(26, 36),
+    image: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNiIgaGVpZ2h0PSIzNiIgdmlld0JveD0iMCAwIDI2IDM2IiBmaWxsPSJub25lIj48cGF0aCBkPSJNMTMgMEM1LjgyIDAgMCA1LjgyIDAgMTNjMCA5LjUgMTMgMjMgMTMgMjNzMTMtMTMuNSAxMy0yM0MyNiA1LjgyIDIwLjE4IDAgMTMgMHoiIGZpbGw9IiM4QTJCRTIiLz48Y2lyY2xlIGN4PSIxMyIgY3k9IjEzIiByPSI2LjUiIGZpbGw9IiNmZmZmZmYiLz48L3N2Zz4="
+});
+
+let contextMenu = document.getElementById("contextMenu");
+let clickLngLat = null;
+
+function notifyBoatStatus(status) {
+    debug("状态: " + status);
+    if (window.BoatLocation && window.BoatLocation.updateStatus) {
+        try {
+            window.BoatLocation.updateStatus(status);
+        } catch (e) {
+            console.log("updateStatus failed:", e);
+        }
+    }
+    pushSimAutoStatus(status);
+}
+
+function currentSimAutoState() {
+    const volume = simSamplingSettings.volumePerBottle || 0.5;
+    const depth = simSamplingSettings.depthMeters || 0.5;
+    let bottle = 1;
+    let site = simLastSite;
+    if (simSamplingActive) {
+        bottle = Math.min(simSamplingActive.done + 1, simSamplingActive.totalBottles);
+        site = simSamplingActive.order;
+    } else if (simSamplingPlan.length) {
+        bottle = 1;
+        site = simSamplingPlan[0].order;
+    } else if (samplingPoints.length) {
+        site = samplingPoints.length;
+        bottle = simSamplingSettings.bottlesPerPoint || 1;
+    }
+    simLastSite = site;
+    return { bottle, volume, depth, site };
+}
+
+function pushSimAutoStatus(status) {
+    if (!window.SamplingTaskBridge || !window.SamplingTaskBridge.updateAutoStatus)
+        return;
+    const st = currentSimAutoState();
+    try {
+        window.SamplingTaskBridge.updateAutoStatus(st.bottle, st.volume, st.depth, st.site, status);
+    } catch (e) {
+        console.log("updateAutoStatus failed:", e);
+    }
+}
+
+function notifyMissionEvent(methodName) {
+    if (!window.SamplingTaskBridge || typeof window.SamplingTaskBridge[methodName] !== "function")
+        return;
+    try {
+        window.SamplingTaskBridge[methodName]();
+    } catch (e) {
+        console.log("notifyMissionEvent failed:", methodName, e);
+    }
+}
+
+function pushSamplerState(winchReady, pumpReady, rinsing, sampling) {
+    if (!window.SamplingTaskBridge || typeof window.SamplingTaskBridge.updateSamplerStatus !== "function")
+        return;
+    try {
+        window.SamplingTaskBridge.updateSamplerStatus(winchReady, pumpReady, rinsing, sampling);
+    } catch (e) {
+        console.log("updateSamplerStatus failed:", e);
+    }
+}
+
+function updateSamplingSimConfig(cfg) {
+    const next = cfg || {};
+    const bottles = Math.max(1, Math.round(next.bottlesPerPoint || 1));
+    const volume = Math.max(0, next.volumePerBottle || 0);
+    const depth = Math.max(0, next.depthMeters || 0);
+    simSamplingSettings = {
+        bottlesPerPoint: bottles,
+        volumePerBottle: volume,
+        depthMeters: depth
+    };
+    debug("采样参数同步: " + bottles + " 瓶/点, " + volume.toFixed(2) + " L, 深度 " + depth.toFixed(2) + " m");
+}
+
+
+// 右键显示菜单（地图空白处）
+AMap.Event.addListener(map, "rightclick", function(e) {
+    clickLngLat = e.lnglat;
+    showContextMenu(e.pixel.x, e.pixel.y);
+});
+
+
+// 左键标点
+AMap.Event.addListener(map, "click", function(e) {
+    contextMenu.style.display = "none";
+
+    // 模拟船起点选取
+    if (simStartMarking) {
+        handleSimStartPoint(e.lnglat.lng, e.lnglat.lat);
+        return;
+    }
+
+    // 自动返航选点模式
+    if (autoReturnMarking) {
+        handleAutoReturnPoint(e.lnglat.lng, e.lnglat.lat);
+        return;
+    }
+
+    // 航线规划选点模式
+    if (selectionMode) {
+        addSelectionPoint(e.lnglat.lng, e.lnglat.lat);
+        return;
+    }
+
+    // 航线编辑模式
+    if (routeEditMode) {
+        addWaypoint(e.lnglat.lng, e.lnglat.lat);
+    }
+});
+
+
+// -------------------------------------------
+// 进入航线编辑模式
+// -------------------------------------------
+function startRouteEdit() {
+
+    routeEditMode = true;
+    samplingMode = false;
+
+    // 清空旧航线
+    routeMarkers.forEach(m => m.setMap(null));
+    routeMarkers = [];
+    if (polyline) polyline.setMap(null);
+    polyline = null;
+
+    alert("进入航线设置模式：左键添加航点，右键保存/放弃");
+    contextMenu.style.display = "none";
+
+    pushRouteToQml();
+}
+
+
+// -------------------------------------------
+// 放弃航线
+// -------------------------------------------
+function discardRoute() {
+
+    clearRoute();
+    routeEditMode = false;
+    contextMenu.style.display = "none";
+}
+
+
+// -------------------------------------------
+// ⭐⭐⭐ 保存航线（调用 C++ RouteSaver.saveRoute()）
+// -------------------------------------------
+function saveRoute() {
+
+    if (!RouteSaver) {
+        alert("RouteSaver 未连接，无法保存！");
+        debug("ERROR: RouteSaver not available");
+        return;
+    }
+
+    if (routeMarkers.length === 0) {
+        alert("没有航点可以保存！");
+        return;
+    }
+
+    let routeData = routeMarkers.map(m => {
+        let p = m.getPosition();
+        return { lng: p.lng, lat: p.lat };
+    });
+
+    debug("Calling C++ saveRoute()...");
+
+    // ⭐ C++函数：Q_INVOKABLE bool saveRoute
+    if (!window.RouteSaver) {
+        alert("RouteSaver 未连接，无法保存！（WebChannel 未初始化）");
+        debug("saveRoute failed: window.RouteSaver missing");
+        return;
+    }
+
+    const ok = RouteSaver.saveRoute(JSON.stringify(routeData));
+    if (!ok) {
+        alert("航线保存失败（无法写入文件）");
+        debug("saveRoute returned false");
+        return;
+    }
+
+    routeEditMode = false;
+    contextMenu.style.display = "none";
+    alert("航线已保存到 routes/ 目录！");
+}
+
+
+// -------------------------------------------
+// 添加航点
+// -------------------------------------------
+function addWaypoint(lng, lat) {
+
+    let marker = new AMap.Marker({
+        position: [lng, lat],
+        map: routeVisible ? map : null,
+        icon: ROUTE_MARKER_ICON,
+        offset: new AMap.Pixel(-13, -30)
+    });
+
+    routeMarkers.push(marker);
+    const markerIndex = routeMarkers.length - 1;
+
+    let path = routeMarkers.map(m => m.getPosition());
+
+    if (!polyline) {
+        polyline = new AMap.Polyline({
+            map: routeVisible ? map : null,
+            path: path,
+            strokeColor: "#00FF00",
+            strokeWeight: 4
+        });
+    } else {
+        polyline.setPath(path);
+        if (routeVisible && !polyline.getMap()) {
+            polyline.setMap(map);
+        }
+    }
+
+    const label = new AMap.Text({
+        text: String(routeMarkers.length),
+        position: [lng, lat],
+        offset: new AMap.Pixel(0, -40),
+        map: routeVisible ? map : null,
+        style: {
+            "background-color": "white",
+            "padding": "2px 5px",
+            "border-radius": "3px",
+            "border": "1px solid #333"
+        }
+    });
+    routeLabels.push(label);
+
+    marker.on("click", function() {
+        if (samplingMode) {
+            toggleSamplingSelection(markerIndex);
+        }
+    });
+    // 在航点上右键显示菜单（针对路线）
+    marker.on("rightclick", function(ev) {
+        clickLngLat = ev.lnglat;
+        showContextMenu(ev.pixel.x, ev.pixel.y, true);
+    });
+
+    pushRouteToQml();
+}
+
+// -------------------------------------------
+// 从原生(QML)加载已保存航线并绘制
+// -------------------------------------------
+function showRouteFromNative(jsonString) {
+    contextMenu.style.display = "none";
+    discardRoute(); // 清除当前
+    clearSamplingSelection(false);
+
+    let data = {};
+    try {
+        data = JSON.parse(jsonString);
+    } catch (e) {
+        alert("航线数据解析失败");
+        return;
+    }
+    let pts = data.points || data;
+    if (!pts || !pts.length) {
+        alert("航线为空");
+        return;
+    }
+
+    // 绘制
+    const wasVisible = routeVisible;
+    pts.forEach(p => addWaypoint(p.lng, p.lat));
+    routeEditMode = false;
+    const samplingFromFile = data.sampling_points || data.samplingPoints;
+    if (samplingFromFile && samplingFromFile.length) {
+        applySamplingPoints(samplingFromFile, { skipNotify: false });
+    } else {
+        updateSamplingVisual();
+    }
+    pushRouteToQml();
+    if (wasVisible) {
+        applyRouteVisibility();
+        map.setFitView(routeMarkers);
+    }
+    alert("已加载航线：" + pts.length + " 个点");
+}
+
+// -------------------------------------------
+// 清除当前航线（点+线+标签）
+// -------------------------------------------
+function clearRoute() {
+    routeMarkers.forEach(m => m.setMap(null));
+    routeMarkers = [];
+    routeLabels.forEach(t => t.setMap(null));
+    routeLabels = [];
+    if (polyline) {
+        polyline.setMap(null);
+        polyline = null;
+    }
+    clearSamplingSelection();
+    routeEditMode = false;
+    pushRouteToQml();
+}
+
+function applyRouteVisibility() {
+    const targetMap = routeVisible ? map : null;
+    routeMarkers.forEach(m => m.setMap(targetMap));
+    routeLabels.forEach(t => t.setMap(targetMap));
+    if (polyline)
+        polyline.setMap(targetMap);
+    const btn = document.getElementById("toggleRoadNetBtn");
+    if (btn)
+        btn.innerText = routeVisible ? "显示航线：开启" : "显示航线：关闭";
+}
+
+// 定位当前设备（或未来替换为船只 GPS）
+function locateCurrentPosition() {
+    // 优先用浏览器定位，失败则使用高德定位插件，再失败使用城市中心，最后地图中心
+    let bestPriority = -1; // -1: none, 0+: got location
+    let ipTriggered = false;
+    let nativeListener = null;
+    let boatListener = null;
+    debug("开始定位...");
+
+    const sourcePriority = { Boat: 4, Native: 3, HTML5: 2, AMap: 2, IP: 1 };
+
+    if (lastBoatLocation) {
+        bestPriority = sourcePriority.Boat;
+        updateLocationMarker(lastBoatLocation.lng, lastBoatLocation.lat);
+        debug("定位成功(Boat 缓存) lng=" + lastBoatLocation.lng + ", lat=" + lastBoatLocation.lat);
+        return;
+    }
+
+    const cleanupBoat = () => {
+        const boat = window.BoatLocation;
+        if (boatListener && boat && boat.locationUpdated) {
+            try { boat.locationUpdated.disconnect(boatListener); } catch(e) {}
+        }
+        boatListener = null;
+    };
+    const cleanupNative = () => {
+        const locator = window.NativeLocator;
+        if (nativeListener && locator && locator.locationUpdated) {
+            try { locator.locationUpdated.disconnect(nativeListener); } catch(e) {}
+        }
+        nativeListener = null;
+    };
+
+    const handleSuccess = (lng, lat, source) => {
+        const priority = sourcePriority[source] || 0;
+        if (priority < bestPriority) return; // 只接受同级或更高优先级的位置
+        bestPriority = priority;
+        if (source === "Boat")
+            cleanupBoat();
+        if (source === "Native")
+            cleanupNative();
+        updateLocationMarker(lng, lat);
+        debug("定位成功(" + source + ") lng=" + lng + ", lat=" + lat);
+    };
+
+    const handleFailFinal = (reason) => {
+        if (bestPriority >= 0) return;
+        if (lastBoatLocation) {
+            debug("使用船载GPS定位(延迟返回) lng=" + lastBoatLocation.lng + ", lat=" + lastBoatLocation.lat);
+            updateLocationMarker(lastBoatLocation.lng, lastBoatLocation.lat);
+            bestPriority = sourcePriority.Boat;
+            cleanupBoat();
+            cleanupNative();
+            return;
+        }
+        cleanupNative();
+        debug("定位失败，使用地图中心: " + reason);
+        fallbackLocate();
+    };
+
+    const tryIPThenAMap = (reason) => {
+        if (bestPriority >= 0 || ipTriggered) return;
+        ipTriggered = true;
+        debug("HTML5 定位失败: " + reason + "，尝试 IP 定位");
+        locateViaIP(
+            (lng, lat) => handleSuccess(lng, lat, "IP"),
+            () => {
+                debug("IP 定位失败，尝试高德定位");
+                locateViaAMap(
+                    (lng, lat) => handleSuccess(lng, lat, "AMap"),
+                    () => handleFailFinal("高德定位失败")
+                );
+            }
+        );
+    };
+
+    const tryStartBoat = () => {
+        const boat = window.BoatLocation;
+        if (!boat) {
+            debug("BoatLocation 不可用，跳过船载定位");
+            return;
+        }
+        if (boat.locationUpdated && typeof boat.locationUpdated.connect === "function") {
+            boatListener = function(lng, lat, heading) {
+                lastBoatLocation = { lng: lng, lat: lat, heading: heading };
+                handleSuccess(lng, lat, "Boat");
+            };
+            try {
+                boat.locationUpdated.connect(boatListener);
+            } catch (e) {
+                debug("BoatLocation.connect 失败: " + e);
+            }
+        }
+        if (typeof boat.requestLocation === "function") {
+            try {
+                boat.requestLocation();
+                debug("已请求船载GPS定位...");
+            } catch (e) {
+                debug("BoatLocation.requestLocation 异常: " + e);
+            }
+        }
+    };
+
+    const tryStartNative = () => {
+        const locator = window.NativeLocator;
+        if (!locator) {
+            debug("NativeLocator 不可用，跳过原生定位");
+            return;
+        }
+        if (locator.locationUpdated && typeof locator.locationUpdated.connect === "function") {
+            nativeListener = function(lng, lat) {
+                handleSuccess(lng, lat, "Native");
+            };
+            try {
+                locator.locationUpdated.connect(nativeListener);
+            } catch (e) {
+                debug("NativeLocator.connect 失败: " + e);
+            }
+        }
+        if (typeof locator.requestLocation === "function") {
+            try {
+                locator.requestLocation();
+                debug("已请求原生定位...");
+            } catch (e) {
+                debug("NativeLocator.requestLocation 异常: " + e);
+            }
+        } else {
+            debug("NativeLocator 不支持 requestLocation");
+        }
+    };
+
+    tryStartBoat();
+    tryStartNative();
+
+    if (navigator.geolocation) {
+        const timer = setTimeout(function(){
+            tryIPThenAMap("timeout");
+        }, 4000);
+        navigator.geolocation.getCurrentPosition(function(pos) {
+            clearTimeout(timer);
+            handleSuccess(pos.coords.longitude, pos.coords.latitude, "HTML5");
+        }, function(err) {
+            clearTimeout(timer);
+            const msg = err && err.message ? err.message : "unknown";
+            const code = err && typeof err.code === "number" ? err.code : null;
+            if (code === 1 || /denied/i.test(msg)) { // 1 === PERMISSION_DENIED
+                debug("HTML5 定位被拒绝，等待原生/其他方式");
+                tryIPThenAMap("denied");
+                return;
+            }
+            // 其他错误时，直接尝试高德；若也失败再兜底
+            tryIPThenAMap(msg);
+        }, { enableHighAccuracy: true, timeout: 4000 });
+    } else {
+        tryIPThenAMap("no geolocation API");
+    }
+
+    // 最终兜底：8 秒还没结果则用当前中心
+    setTimeout(function(){
+        handleFailFinal("整体超时");
+    }, 8000);
+}
+
+function updateLocationMarker(lng, lat, opts) {
+    opts = opts || {};
+    const recenter = opts.recenter !== false; // 默认重定位，模拟船更新时可传 { recenter: false }
+    const zoomLevel = typeof opts.zoom === "number" ? opts.zoom : 16;
+    if (!locationMarker) {
+        locationMarker = new AMap.Marker({
+            position: [lng, lat],
+            map: map,
+            content: '<div class="loc-marker"></div>',
+            offset: new AMap.Pixel(-12, -12),
+            title: "当前位置"
+        });
+    } else {
+        locationMarker.setPosition([lng, lat]);
+        if (!locationMarker.getMap()) {
+            locationMarker.setMap(map);
+        }
+    }
+    if (recenter) {
+        map.setCenter([lng, lat]);
+        map.setZoom(zoomLevel);
+    }
+}
+
+// 定位失败回退：使用当前地图中心点
+function fallbackLocate() {
+    const center = map.getCenter();
+    debug("使用地图中心作为定位: lng=" + center.lng + ", lat=" + center.lat);
+    updateLocationMarker(center.lng, center.lat);
+}
+
+// 使用高德定位插件作为兜底
+function locateViaAMap(successCb, failCb) {
+    successCb = successCb || function(){};
+    failCb = failCb || fallbackLocate;
+    AMap.plugin('AMap.Geolocation', function() {
+        const geo = new AMap.Geolocation({
+            enableHighAccuracy: true,
+            timeout: 5000,
+            GeoLocationFirst: true,
+            convert: true
+        });
+        geo.getCurrentPosition(function(status, result) {
+            if (status === 'complete' && result.position) {
+                debug("高德定位成功 status=complete");
+                successCb(result.position.lng, result.position.lat);
+            } else {
+                debug("高德定位失败，改用城市/IP; status=" + status);
+                locateByCityCenter(successCb, function(){
+                    locateViaIP(successCb, failCb);
+                });
+            }
+        });
+    });
+}
+
+// 使用城市中心点作为兜底
+function locateByCityCenter(successCb, failCb) {
+    successCb = successCb || function(){};
+    failCb = failCb || fallbackLocate;
+    AMap.plugin('AMap.CitySearch', function() {
+        const citySearch = new AMap.CitySearch();
+        citySearch.getLocalCity(function(status, result) {
+            if (status === 'complete' && result && result.rectangle) {
+                debug("CitySearch 成功: " + JSON.stringify(result.city || result.info || ""));
+                const rect = result.rectangle.split(';');
+                if (rect.length === 2) {
+                    const p1 = rect[0].split(',');
+                    const p2 = rect[1].split(',');
+                    if (p1.length === 2 && p2.length === 2) {
+                        const lng = (parseFloat(p1[0]) + parseFloat(p2[0])) / 2;
+                        const lat = (parseFloat(p1[1]) + parseFloat(p2[1])) / 2;
+                        debug("使用城市中心作为定位: lng=" + lng + ", lat=" + lat);
+                        successCb(lng, lat);
+                        return;
+                    }
+                }
+            }
+            debug("城市中心定位失败，尝试 IP 定位");
+            locateViaIP(successCb, failCb);
+        });
+    });
+}
+
+// 通过高德 IP 接口定位（无需浏览器权限）
+function locateViaIP(successCb, failCb) {
+    successCb = successCb || function(){};
+    failCb = failCb || fallbackLocate;
+    const key = "a26f59af94f119d4d6ab81c24d88f2ad"; // 与地图脚本一致
+    const amapUrl = `https://restapi.amap.com/v3/ip?key=${key}`;
+
+    // 先尝试高德 IP 服务，失败再试公共 IPAPI
+    fetch(amapUrl).then(resp => resp.json()).then(data => {
+        if (data && data.status === "1" && data.rectangle) {
+            const rect = data.rectangle.split(";");
+            if (rect.length === 2) {
+                const p1 = rect[0].split(",");
+                const p2 = rect[1].split(",");
+                if (p1.length === 2 && p2.length === 2) {
+                    const lng = (parseFloat(p1[0]) + parseFloat(p2[0])) / 2;
+                    const lat = (parseFloat(p1[1]) + parseFloat(p2[1])) / 2;
+                    debug("IP 定位成功(高德) lng=" + lng + ", lat=" + lat);
+                    successCb(lng, lat);
+                    return;
+                }
+            }
+        }
+        debug("高德 IP 定位失败，尝试备用 IP 服务");
+        return fetch("https://ipapi.co/json/");
+    }).then(resp => {
+        if (!resp) return null;
+        return resp.json();
+    }).then(data => {
+        if (data && data.latitude && data.longitude) {
+            const lng = parseFloat(data.longitude);
+            const lat = parseFloat(data.latitude);
+            debug("IP 定位成功(ipapi) lng=" + lng + ", lat=" + lat);
+            successCb(lng, lat);
+            return;
+        }
+        debug("备用 IP 定位失败，使用地图中心");
+        failCb();
+    }).catch(err => {
+        debug("IP 定位异常: " + err);
+        failCb();
+    });
+}
+
+// 计算当前船只位置，优先使用船载 GPS，其次是地图上的定位标记
+function getCurrentBoatPosition() {
+    if (lastBoatLocation && typeof lastBoatLocation.lng === "number" && typeof lastBoatLocation.lat === "number") {
+        return { lng: lastBoatLocation.lng, lat: lastBoatLocation.lat };
+    }
+    if (locationMarker && typeof locationMarker.getPosition === "function") {
+        const pos = locationMarker.getPosition();
+        if (pos && typeof pos.lng === "number" && typeof pos.lat === "number") {
+            return { lng: pos.lng, lat: pos.lat };
+        }
+    }
+    return null;
+}
+
+// 获取任务终点（优先规划航线的终点，其次是已加载航线的终点）
+function getRouteEndPoint() {
+    const pts = getCurrentRoutePoints();
+    if (pts.length > 0) {
+        const last = pts[pts.length - 1];
+        return { lng: last.lng, lat: last.lat };
+    }
+    return null;
+}
+
+// 清理自动返航的标注与线
+function clearAutoReturnPath() {
+    if (autoReturnStartMarker) {
+        autoReturnStartMarker.setMap(null);
+        autoReturnStartMarker = null;
+    }
+    if (autoReturnTargetMarker) {
+        autoReturnTargetMarker.setMap(null);
+        autoReturnTargetMarker = null;
+    }
+    if (autoReturnLine) {
+        autoReturnLine.setMap(null);
+        autoReturnLine = null;
+    }
+    autoReturnMarking = false;
+    map.setDefaultCursor("default");
+}
+
+// 绘制当前位置到目标点的返航路线
+function drawAutoReturnRoute(start, target, targetLabel) {
+    clearAutoReturnPath();
+
+    autoReturnStartMarker = new AMap.Marker({
+        position: [start.lng, start.lat],
+        map: map,
+        label: { content: "当前船位", direction: "top" },
+        icon: "https://webapi.amap.com/theme/v1.3/markers/n/mark_b.png",
+        offset: new AMap.Pixel(-10, -28)
+    });
+
+    autoReturnTargetMarker = new AMap.Marker({
+        position: [target.lng, target.lat],
+        map: map,
+        label: { content: targetLabel || "返航点", direction: "top" },
+        icon: "https://webapi.amap.com/theme/v1.3/markers/n/mark_r.png",
+        offset: new AMap.Pixel(-10, -28)
+    });
+
+    autoReturnLine = new AMap.Polyline({
+        map: map,
+        path: [
+            [start.lng, start.lat],
+            [target.lng, target.lat]
+        ],
+        strokeColor: "#ff4d4f",
+        strokeWeight: 5,
+        strokeStyle: "solid",
+        showDir: true
+    });
+
+    map.setFitView([autoReturnStartMarker, autoReturnTargetMarker]);
+    debug("自动返航规划完成：从 (" + start.lng + "," + start.lat + ") 到 (" + target.lng + "," + target.lat + ")");
+
+    // 启动模拟船按返航线行驶
+    startSimWithPoints([
+        { lng: start.lng, lat: start.lat },
+        { lng: target.lng, lat: target.lat }
+    ], "return");
+}
+
+// 按任务终点规划返航
+function startAutoReturnToRouteEnd() {
+    const start = getCurrentBoatPosition();
+    if (!start) {
+        alert("暂未获取到船只当前位置，无法返航。");
+        return;
+    }
+    const end = getRouteEndPoint();
+    if (!end) {
+        alert("当前没有可用的任务终点。");
+        return;
+    }
+    drawAutoReturnRoute(start, end, "任务终点");
+}
+
+// 进入自定义返航点选取模式
+function startAutoReturnMarking() {
+    clearAutoReturnPath();
+    autoReturnMarking = true;
+    selectionMode = false;
+    routeEditMode = false;
+    samplingMode = false;
+    map.setDefaultCursor("crosshair");
+    contextMenu.style.display = "none";
+    alert("请标记返航点");
+    debug("自动返航：等待用户标记返航点");
+}
+
+// 处理用户点击的返航点
+function handleAutoReturnPoint(lng, lat) {
+    if (!autoReturnMarking) return;
+    autoReturnMarking = false;
+    map.setDefaultCursor("default");
+    const start = getCurrentBoatPosition();
+    if (!start) {
+        alert("暂未获取到船只当前位置，无法返航。");
+        return;
+    }
+    drawAutoReturnRoute(start, { lng: lng, lat: lat }, "返航点");
+}
+
+// 获取当前可用航线点（优先已规划的 plannedMarkers，其次已加载的 routeMarkers）
+function getCurrentRoutePoints() {
+    if (plannedMarkers.length > 0) {
+        return plannedMarkers.map(m => {
+            const p = m.getPosition();
+            return { lng: p.lng, lat: p.lat };
+        });
+    }
+    if (routeMarkers.length > 0) {
+        return routeMarkers.map(m => {
+            const p = m.getPosition();
+            return { lng: p.lng, lat: p.lat };
+        });
+    }
+    return [];
+}
+
+// ============================
+// 模拟无人船按航线行驶
+// ============================
+function ensureManualLabel() {
+    if (!manualStatusLabel) {
+        manualStatusLabel = new AMap.Text({
+            text: "正在手动操纵",
+            position: map.getCenter(),
+            offset: new AMap.Pixel(-10, -46),
+            style: {
+                "background-color": "rgba(17, 24, 39, 0.85)",
+                "padding": "4px 8px",
+                "border-radius": "6px",
+                "border": "1px solid rgba(0,0,0,0.25)",
+                "color": "#fff",
+                "font-weight": "bold",
+                "letter-spacing": "1px"
+            }
+        });
+    }
+}
+
+function updateManualLabel(visible) {
+    if (!manualStatusLabel)
+        ensureManualLabel();
+    if (!manualStatusLabel)
+        return;
+    if (simMarker && typeof simMarker.getPosition === "function") {
+        manualStatusLabel.setPosition(simMarker.getPosition());
+    } else if (lastBoatLocation) {
+        manualStatusLabel.setPosition([lastBoatLocation.lng, lastBoatLocation.lat]);
+    }
+    manualStatusLabel.setMap(visible ? map : null);
+}
+
+function stopManualControl() {
+    if (manualTimer) {
+        clearInterval(manualTimer);
+        manualTimer = null;
+    }
+    manualVector = { x: 0, y: 0 };
+    manualActiveUntil = 0;
+    updateManualLabel(false);
+    manualLastStatus = "";
+}
+
+function startManualControl() {
+    if (!manualTimer) {
+        stopSimFollowRoute(); // 保证手动模式与航线模拟互斥
+        manualLastTs = Date.now();
+        manualTimer = setInterval(manualStep, 100);
+    }
+    setManualStatus("正在手动操纵");
+    updateManualLabel(true);
+}
+
+function updateSimSpeed(speed) {
+    const s = Math.max(0, isFinite(speed) ? speed : 0);
+    simSpeedSetting = s;
+    simSpeed = s;
+    debug("设置模拟速度: " + s.toFixed(2) + " m/s");
+}
+
+function applyManualControl(sway, surge, speedLimit) {
+    const clamp = v => Math.max(-1, Math.min(1, isFinite(v) ? v : 0));
+    const x = clamp(sway);
+    const y = clamp(surge);
+    manualVector = { x: x, y: -y }; // surge 向前为负，转为数学上的正向
+    manualSpeedLimit = Math.max(0, isFinite(speedLimit) ? speedLimit : 0);
+    manualActiveUntil = Date.now() + MANUAL_IDLE_TIMEOUT_MS;
+    startManualControl();
+}
+
+function manualStep() {
+    if (!manualTimer)
+        return;
+    const now = Date.now();
+    const dt = Math.max(0, (now - manualLastTs) / 1000.0);
+    manualLastTs = now;
+
+    let pos = getCurrentBoatPosition();
+    if (!pos) {
+        const center = map.getCenter();
+        pos = { lng: center.getLng(), lat: center.getLat() };
+    }
+
+    const vecLen = Math.sqrt(manualVector.x * manualVector.x + manualVector.y * manualVector.y);
+    const active = vecLen > 0.01 && manualSpeedLimit > 0;
+    let nextLng = pos.lng;
+    let nextLat = pos.lat;
+    let heading = (lastBoatLocation && isFinite(lastBoatLocation.heading)) ? lastBoatLocation.heading : 0;
+
+    if (active) {
+        const metersPerDegLat = 111000.0;
+        const metersPerDegLon = 111000.0 * Math.cos(pos.lat * Math.PI / 180.0);
+        const dxMeters = manualVector.x * manualSpeedLimit * dt;
+        const dyMeters = manualVector.y * manualSpeedLimit * dt;
+        nextLng += dxMeters / metersPerDegLon;
+        nextLat += dyMeters / metersPerDegLat;
+        heading = (Math.atan2(manualVector.x, manualVector.y) * 180.0 / Math.PI + 360.0) % 360.0;
+    }
+
+    const nextPos = { lng: nextLng, lat: nextLat };
+    applySimPosition(nextPos, heading);
+    updateManualStatus(nextPos);
+    const stillActive = active || (now <= manualActiveUntil);
+    updateManualLabel(stillActive);
+    if (!stillActive) {
+        stopManualControl();
+    }
+}
+
+function clearSimSamplingState() {
+    if (simSamplingTimer) {
+        clearTimeout(simSamplingTimer);
+        simSamplingTimer = null;
+    }
+    simSamplingActive = null;
+    simSamplingPlan = [];
+    pushSamplerState(false, false, false, false);
+}
+
+function buildSimSamplingPlan() {
+    simSamplingPlan = [];
+    if (simMode === "return" || simPath.length < 2) {
+        return;
+    }
+    if (samplingPoints.length) {
+        samplingPoints.forEach(function(sp, idx) {
+            const simIndex = sp.index + 1; // 路径中第 0 位是模拟起点
+            if (simIndex >= simPath.length)
+                return;
+            simSamplingPlan.push({ simIndex: simIndex, order: idx + 1 });
+        });
+    } else {
+        for (let simIndex = 1; simIndex < simPath.length; ++simIndex) {
+            simSamplingPlan.push({ simIndex: simIndex, order: simIndex });
+        }
+    }
+    simSamplingPlan.sort(function(a, b) { return a.simIndex - b.simIndex; });
+}
+
+function handleSimArrival(arrivalIndex) {
+    if (simSamplingActive) return;
+    if (simSamplingPlan.length) {
+        const next = simSamplingPlan[0];
+        if (arrivalIndex === next.simIndex) {
+            simSamplingPlan.shift();
+            notifyMissionEvent("notifyMissionReachedWaypoint");
+            startSamplingAtPoint(next);
+            return;
+        }
+        notifyBoatStatus("行进中（前往采样点" + next.order + "）");
+        return;
+    }
+    if (arrivalIndex >= simPath.length - 1) {
+        notifyBoatStatus(simMode === "return"
+            ? "返航完成：已抵达终点"
+            : "任务完成：已抵达终点");
+    } else if (simMode === "return") {
+        notifyBoatStatus("返航中：前往终点");
+    }
+}
+
+function startSamplingAtPoint(planItem) {
+    if (!planItem) return;
+    const total = Math.max(1, simSamplingSettings.bottlesPerPoint || 1);
+    simSamplingActive = {
+        order: planItem.order,
+        totalBottles: total,
+        done: 0
+    };
+    notifyBoatStatus("准备中（采样点" + simSamplingActive.order + "）");
+    pushSamplerState(true, true, false, false);
+    simSamplingTimer = setTimeout(() => {
+        if (!simSamplingActive) return;
+        notifyMissionEvent("notifyMissionPrepDone");
+        notifyBoatStatus("润洗中（采样点" + simSamplingActive.order + "）");
+        pushSamplerState(true, true, true, false);
+        simSamplingTimer = setTimeout(() => {
+            if (!simSamplingActive) return;
+            notifyMissionEvent("notifyMissionRinseDone");
+            const tick = () => {
+                if (!simSamplingActive) return;
+                simSamplingActive.done += 1;
+                if (simSamplingActive.done >= simSamplingActive.totalBottles) {
+                    notifyMissionEvent("notifyMissionSampleDone");
+                    notifyBoatStatus("收尾中（采样点" + simSamplingActive.order + "）");
+                    pushSamplerState(true, false, false, false);
+                    simSamplingTimer = setTimeout(() => {
+                        if (!simSamplingActive) return;
+                        notifyMissionEvent("notifyMissionPostDone");
+                        finishSamplingAtPoint();
+                    }, POST_DURATION_MS);
+                    return;
+                }
+                const nextBottle = simSamplingActive.done + 1;
+                notifyBoatStatus("采样中（采样点" + simSamplingActive.order + "，瓶 " + nextBottle + "/" + simSamplingActive.totalBottles + "，5s/瓶）");
+                pushSamplerState(true, true, false, true);
+                simSamplingTimer = setTimeout(tick, SAMPLE_DURATION_PER_BOTTLE_MS);
+            };
+            notifyBoatStatus("采样中（采样点" + simSamplingActive.order + "，瓶 1/" + simSamplingActive.totalBottles + "，5s/瓶）");
+            pushSamplerState(true, true, false, true);
+            simSamplingTimer = setTimeout(tick, SAMPLE_DURATION_PER_BOTTLE_MS);
+        }, RINSE_DURATION_MS);
+    }, PREP_DURATION_MS);
+}
+
+function finishSamplingAtPoint() {
+    if (simSamplingTimer) {
+        clearTimeout(simSamplingTimer);
+        simSamplingTimer = null;
+    }
+    const finishedOrder = simSamplingActive ? simSamplingActive.order : null;
+    simSamplingActive = null;
+    const atFinalPoint = simSegIndex >= simPath.length - 1;
+    const nextOrder = simSamplingPlan.length ? simSamplingPlan[0].order : null;
+    const modeText = simMode === "return" ? "返航中" : "行进中";
+    if (atFinalPoint) {
+        notifyBoatStatus(simMode === "return"
+            ? "返航完成：已抵达终点"
+            : "任务完成：已抵达终点");
+        if (simMode === "return") {
+            notifyMissionEvent("notifyReturnHomeDone");
+        }
+        stopSimFollowRoute();
+        return;
+    }
+    if (nextOrder) {
+        notifyBoatStatus(modeText + "（下一个采样点" + nextOrder + "）");
+    } else if (finishedOrder !== null) {
+        notifyBoatStatus(modeText + "（采样完成，继续航线）");
+    }
+    simLastTs = Date.now(); // 采样期间时间被拉平，恢复基准
+}
+
+function startSimWithPoints(pts, mode) {
+    if (!pts || pts.length < 2) {
+        return;
+    }
+    stopManualControl();
+    simPath = pts;
+    simMode = mode || "route";
+    simSegIndex = 0;
+    simSegProgress = 0;
+    simLastTs = Date.now();
+    simPaused = false;
+    simSpeed = Math.max(0, isFinite(simSpeedSetting) ? simSpeedSetting : 1.5); // m/s，可按需调整
+    clearSimSamplingState();
+    buildSimSamplingPlan();
+    if (simTimer) clearInterval(simTimer);
+    simTimer = setInterval(simStep, 200);
+    contextMenu.style.display = "none";
+    if (!simPreviewLine) {
+        simPreviewLine = new AMap.Polyline({
+            map: map,
+            path: pts.map(p => [p.lng, p.lat]),
+            strokeColor: "#FF8800",
+            strokeWeight: 4,
+            showDir: true
+        });
+    } else {
+        simPreviewLine.setPath(pts.map(p => [p.lng, p.lat]));
+        simPreviewLine.setMap(map);
+    }
+    const nextSampling = simSamplingPlan.length ? simSamplingPlan[0].order : null;
+    if (simMode === "return") {
+        notifyBoatStatus("返航中：前往终点");
+    } else {
+        notifyBoatStatus(nextSampling
+            ? "行进中（前往采样点" + nextSampling + "）"
+            : "行进中：沿航线行驶");
+    }
+    debug("模拟船已启动，共 " + pts.length + " 个点，并已显示模拟航迹");
+}
+
+function ensureBoatInitialized() {
+    const current = getCurrentBoatPosition();
+    if (current) {
+        applySimPosition(current, lastBoatLocation && isFinite(lastBoatLocation.heading) ? lastBoatLocation.heading : 0);
+        return true;
+    }
+
+    const routePts = getCurrentRoutePoints();
+    let fallback = null;
+    if (routePts.length > 0) {
+        fallback = routePts[0];
+    } else {
+        const center = map.getCenter();
+        fallback = { lng: center.getLng(), lat: center.getLat() };
+    }
+
+    applySimPosition(fallback, 0);
+    notifyBoatStatus("待命：模拟船已就绪");
+    return true;
+}
+
+function startSimFromCurrentRoute() {
+    const routePts = getCurrentRoutePoints();
+    if (routePts.length < 2) {
+        ensureBoatInitialized();
+        alert("请先加载或规划一条至少包含 2 个点的航线，再启动自动航行。");
+        return false;
+    }
+
+    ensureBoatInitialized();
+    const current = getCurrentBoatPosition();
+    let path = routePts.slice();
+    if (current && distanceMeters(current, routePts[0]) > 1.0) {
+        path = [{ lng: current.lng, lat: current.lat }].concat(routePts);
+    }
+
+    startSimWithPoints(path, "route");
+    return true;
+}
+
+function startSimFollowRoute() {
+    const routePts = getCurrentRoutePoints();
+    if (routePts.length < 1) {
+        alert("请先加载或规划一条至少包含 1 个点的航线，再启动模拟。");
+        return;
+    }
+    simStartMarking = true;
+    selectionMode = false;
+    routeEditMode = false;
+    autoReturnMarking = false;
+    map.setDefaultCursor("crosshair");
+    contextMenu.style.display = "none";
+    alert("请在地图上点击模拟船的起点，将自动连到航线第一个点并开始模拟。");
+    debug("模拟船：等待用户点击起点");
+}
+
+function stopSimFollowRoute() {
+    if (simTimer) {
+        clearInterval(simTimer);
+        simTimer = null;
+    }
+    if (simMarker) {
+        simMarker.setMap(null);
+        simMarker = null;
+    }
+    if (simStartMarker) {
+        simStartMarker.setMap(null);
+        simStartMarker = null;
+    }
+    if (simPreviewLine) {
+        simPreviewLine.setMap(null);
+        simPreviewLine = null;
+    }
+    clearSimSamplingState();
+    simMode = "idle";
+    simStartMarking = false;
+    map.setDefaultCursor("default");
+    simPaused = false;
+    contextMenu.style.display = "none";
+}
+
+function stopAllBoatSimulation() {
+    stopSimFollowRoute();
+    stopManualControl();
+    notifyBoatStatus("待命");
+}
+
+// 处理模拟船起点选取
+function handleSimStartPoint(lng, lat) {
+    if (!simStartMarking) return;
+    simStartMarking = false;
+    map.setDefaultCursor("default");
+
+    const routePts = getCurrentRoutePoints();
+    if (routePts.length < 1) {
+        alert("当前没有可用的航线点，无法启动模拟。");
+        return;
+    }
+
+    if (simStartMarker) {
+        simStartMarker.setMap(null);
+    }
+    simStartMarker = new AMap.Marker({
+        position: [lng, lat],
+        map: map,
+        icon: "https://webapi.amap.com/theme/v1.3/markers/n/start.png",
+        offset: new AMap.Pixel(-13, -30)
+    });
+
+    const path = [{ lng: lng, lat: lat }].concat(routePts);
+    startSimWithPoints(path);
+}
+
+function pauseSimFollowRoute() {
+    if (!simTimer) return;
+    simPaused = true;
+    simLastTs = Date.now(); // 重置时间基准，避免恢复时跳跃
+    contextMenu.style.display = "none";
+    debug("模拟船已暂停");
+}
+
+function resumeSimFollowRoute() {
+    if (!simTimer) return;
+    simPaused = false;
+    simLastTs = Date.now();
+    contextMenu.style.display = "none";
+    debug("模拟船已继续");
+}
+
+function distanceMeters(p1, p2) {
+    const R = 6371000.0;
+    const dLat = (p2.lat - p1.lat) * Math.PI / 180.0;
+    const dLon = (p2.lng - p1.lng) * Math.PI / 180.0;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(p1.lat * Math.PI/180.0) * Math.cos(p2.lat * Math.PI/180.0) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+function bearingDeg(p1, p2) {
+    const y = Math.sin((p2.lng - p1.lng) * Math.PI / 180.0) * Math.cos(p2.lat * Math.PI / 180.0);
+    const x = Math.cos(p1.lat * Math.PI / 180.0) * Math.sin(p2.lat * Math.PI / 180.0) -
+              Math.sin(p1.lat * Math.PI / 180.0) * Math.cos(p2.lat * Math.PI / 180.0) *
+              Math.cos((p2.lng - p1.lng) * Math.PI / 180.0);
+    const brng = Math.atan2(y, x) * 180.0 / Math.PI;
+    return (brng + 360.0) % 360.0;
+}
+
+function simStep() {
+    if (!simTimer || simPath.length < 2) return;
+    if (simSamplingActive) {
+        simLastTs = Date.now();
+        return;
+    }
+    if (simPaused) {
+        simLastTs = Date.now();
+        return;
+    }
+    const now = Date.now();
+    const dt = (now - simLastTs) / 1000.0;
+    simLastTs = now;
+    let dist = simSpeed * dt;
+
+    while (dist > 0 && simSegIndex < simPath.length - 1) {
+        const p1 = simPath[simSegIndex];
+        const p2 = simPath[simSegIndex + 1];
+        const segLen = distanceMeters(p1, p2);
+        const remaining = segLen - simSegProgress;
+        if (dist >= remaining) {
+            simSegIndex += 1;
+            simSegProgress = 0;
+            dist -= remaining;
+            applySimPosition(p2, bearingDeg(p1, p2));
+            handleSimArrival(simSegIndex);
+            if (simSamplingActive) {
+                return; // 采样中暂停位移
+            }
+            if (simSegIndex >= simPath.length - 1) {
+                stopSimFollowRoute();
+                debug("模拟船已到达航线终点");
+                return;
+            }
+            continue;
+        } else {
+            simSegProgress += dist;
+            dist = 0;
+            const t = simSegProgress / segLen;
+            const lng = p1.lng + (p2.lng - p1.lng) * t;
+            const lat = p1.lat + (p2.lat - p1.lat) * t;
+            const heading = bearingDeg(p1, p2);
+            applySimPosition({ lng, lat }, heading);
+        }
+    }
+}
+
+function applySimPosition(pos, heading) {
+    const normalizeHeading = function(h) {
+        if (!isFinite(h))
+            return 0;
+        const v = (h + SHIP_ICON_HEADING_OFFSET) % 360;
+        return v < 0 ? v + 360 : v;
+    };
+    const markerHeading = isFinite(heading) ? heading
+                        : (lastBoatLocation && isFinite(lastBoatLocation.heading) ? lastBoatLocation.heading : 0);
+    const iconAngle = normalizeHeading(markerHeading);
+
+    if (!simMarker) {
+        simMarker = new AMap.Marker({
+            position: [pos.lng, pos.lat],
+            map: map,
+            icon: new AMap.Icon({
+                size: new AMap.Size(40, 40),
+                image: "qrc:/ship.png",
+                imageSize: new AMap.Size(40, 40)
+            }),
+            offset: new AMap.Pixel(-20, -20),
+            autoRotation: true,
+            angle: iconAngle
+        });
+    } else {
+        simMarker.setPosition([pos.lng, pos.lat]);
+        simMarker.setAngle(iconAngle);
+        if (!simMarker.getMap()) simMarker.setMap(map);
+    }
+
+    lastBoatLocation = { lng: pos.lng, lat: pos.lat, heading: markerHeading };
+    updateLocationMarker(pos.lng, pos.lat, { recenter: false });
+
+    if (window.BoatLocation && window.BoatLocation.emitLocation) {
+        try {
+            window.BoatLocation.emitLocation(pos.lng, pos.lat, heading);
+        } catch (e) {
+            console.log("emitLocation failed:", e);
+        }
+    }
+}
+
+// 航线规划：清理临时选区/规划
+function clearPlanningGraphics() {
+    selectionMarkers.forEach(m => m.setMap(null));
+    selectionMarkers = [];
+    selectionLabels.forEach(t => t.setMap(null));
+    selectionLabels = [];
+    if (selectionPolygon) {
+        selectionPolygon.setMap(null);
+        selectionPolygon = null;
+    }
+    plannedMarkers.forEach(m => m.setMap(null));
+    plannedMarkers = [];
+    if (plannedPolyline) {
+        plannedPolyline.setMap(null);
+        plannedPolyline = null;
+    }
+    clearSamplingSelection();
+}
+
+// 进入选点模式（供 QML 调用）
+function startRouteSelection() {
+    clearPlanningGraphics();
+    selectionMode = true;
+    alert("航线规划：请依次点击地图选择 4 个点框出区域");
+}
+
+// 接收选点
+function addSelectionPoint(lng, lat) {
+    if (!selectionMode) return;
+    const marker = new AMap.Marker({
+        position: [lng, lat],
+        map: map,
+        icon: "https://webapi.amap.com/theme/v1.3/markers/n/mark_r.png"
+    });
+    selectionMarkers.push(marker);
+    const labelText = selectionMarkers.length === 1 ? "起点" :
+                      selectionMarkers.length === 4 ? "终点" : "";
+    const showLabel = labelText.length > 0;
+    const label = new AMap.Text({
+        text: labelText,
+        position: [lng, lat],
+        offset: new AMap.Pixel(-5, -40),
+        map: showLabel ? map : null,
+        style: {
+            "background-color": "#fff",
+            "padding": "2px 6px",
+            "border-radius": "4px",
+            "border": "1px solid #ff6600",
+            "color": "#ff3300",
+            "font-weight": "bold"
+        }
+    });
+    selectionLabels.push(label);
+    if (selectionMarkers.length >= 3) {
+        const path = selectionMarkers.map(m => m.getPosition());
+        if (!selectionPolygon) {
+            selectionPolygon = new AMap.Polygon({
+                map: map,
+                path: path,
+                strokeColor: "#FF8800",
+                fillColor: "#FF880033",
+                strokeWeight: 2
+            });
+        } else {
+            selectionPolygon.setPath(path);
+        }
+    }
+    if (window.RoutePlanner && RoutePlanner.addPoint) {
+        RoutePlanner.addPoint(lng, lat);
+    }
+    if (selectionMarkers.length === 4) {
+        selectionMode = false;
+        alert("已选 4 个点，可在左侧设置点位数并规划航线");
+    }
+}
+
+function hideSelectionMarkers() {
+    selectionMarkers.forEach(m => m.setMap(null));
+    selectionLabels.forEach(t => t.setMap(null));
+}
+
+// 展示规划好的航线（供 QML 调用）
+function showPlannedRoute(points) {
+    if (!points || !points.length) return;
+    clearSamplingSelection();
+    hideSelectionMarkers();
+    plannedMarkers.forEach(m => m.setMap(null));
+    plannedMarkers = [];
+    if (plannedPolyline) {
+        plannedPolyline.setMap(null);
+        plannedPolyline = null;
+    }
+    const path = [];
+    points.forEach((p, idx) => {
+        path.push([p.lon, p.lat]);
+        const m = new AMap.Marker({
+            position: [p.lon, p.lat],
+            map: map,
+            label: { content: String(idx + 1), direction: "top" },
+            icon: PLANNED_MARKER_ICON,
+            offset: new AMap.Pixel(-10, -28)
+        });
+        const markerIndex = idx;
+        m.on("click", function() {
+            if (samplingMode) {
+                toggleSamplingSelection(markerIndex);
+            }
+        });
+        plannedMarkers.push(m);
+    });
+    plannedPolyline = new AMap.Polyline({
+        map: map,
+        path: path,
+        strokeColor: "#1E90FF",
+        strokeWeight: 4
+    });
+    map.setFitView(plannedMarkers);
+}
+
+// ============================
+// 采样点选择逻辑
+// ============================
+function getSamplingTargetMarkers() {
+    if (plannedMarkers.length > 0)
+        return plannedMarkers;
+    return routeMarkers;
+}
+
+function pushSamplingSelectionToQml() {
+    if (!window.RoutePlanner || !RoutePlanner.setSamplingPoints)
+        return;
+    const markers = getSamplingTargetMarkers();
+    const payload = samplingPoints.map(function(sp, idx) {
+        let lng = sp.lng;
+        let lat = sp.lat;
+        const m = markers[sp.index];
+        if (m && typeof m.getPosition === "function") {
+            const pos = m.getPosition();
+            if (pos) {
+                lng = pos.lng;
+                lat = pos.lat;
+            }
+        }
+        const norm = normalizeSamplingPoint(sp, idx);
+        norm.lng = lng;
+        norm.lat = lat;
+        return norm;
+    });
+    try {
+        RoutePlanner.setSamplingPoints(JSON.stringify(payload));
+    } catch (e) {
+        console.log("setSamplingPoints failed:", e);
+    }
+}
+
+function pushRouteToQml() {
+    if (!window.RoutePlanner || !RoutePlanner.updateRouteFromMap)
+        return;
+    const pts = getCurrentRoutePoints();
+    try {
+        RoutePlanner.updateRouteFromMap(JSON.stringify(pts));
+    } catch (e) {
+        console.log("updateRouteFromMap failed:", e);
+    }
+}
+
+function updateSamplingVisual() {
+    const markers = getSamplingTargetMarkers();
+    const usingPlanned = plannedMarkers.length > 0;
+    for (let i = 0; i < markers.length; ++i) {
+        const marker = markers[i];
+        const samplingIdx = samplingPoints.findIndex(function(sp) { return sp.index === i; });
+        const isSampling = samplingIdx !== -1;
+        const sp = isSampling ? normalizeSamplingPoint(samplingPoints[samplingIdx], samplingIdx) : null;
+        if (isSampling) {
+            samplingPoints[samplingIdx] = sp;
+        }
+        const order = isSampling ? (sp && sp.order ? sp.order : (samplingIdx + 1)) : null;
+        const labelText = isSampling ? ("采样点" + order) : String(i + 1);
+        if (marker && typeof marker.setIcon === "function") {
+            marker.setIcon(isSampling ? SAMPLING_MARKER_ICON :
+                           (usingPlanned ? PLANNED_MARKER_ICON : ROUTE_MARKER_ICON));
+        }
+        if (usingPlanned) {
+            if (marker && typeof marker.setLabel === "function") {
+                marker.setLabel({ content: labelText, direction: "top" });
+            }
+        } else {
+            if (routeLabels[i]) {
+                routeLabels[i].setText(labelText);
+            }
+        }
+        if (marker) {
+            marker.__samplingData = sp;
+            attachSamplingHover(marker);
+        }
+    }
+}
+
+function clearSamplingSelection(skipNotify) {
+    samplingPoints = [];
+    samplingMode = false;
+    map.setDefaultCursor("default");
+    updateSamplingVisual();
+    if (skipNotify !== true) {
+        pushSamplingSelectionToQml();
+    }
+}
+
+function toggleSamplingSelection(markerIndex) {
+    if (!samplingMode)
+        return;
+    const markers = getSamplingTargetMarkers();
+    if (!markers.length || markerIndex < 0 || markerIndex >= markers.length)
+        return;
+    const existing = samplingPoints.findIndex(function(sp) { return sp.index === markerIndex; });
+    if (existing >= 0) {
+        samplingPoints.splice(existing, 1);
+    } else {
+        const pos = markers[markerIndex].getPosition();
+        const sp = normalizeSamplingPoint({
+            index: markerIndex,
+            lng: pos ? pos.lng : undefined,
+            lat: pos ? pos.lat : undefined,
+            pointIndex: markerIndex + 1,
+            site: markerIndex + 1,
+            order: samplingPoints.length + 1
+        });
+        samplingPoints.push(sp);
+    }
+    updateSamplingVisual();
+    pushSamplingSelectionToQml();
+}
+
+function startSamplingSelection() {
+    const markers = getSamplingTargetMarkers();
+    if (!markers.length) {
+        alert("请先规划或加载航线，再选择采样点。");
+        return;
+    }
+    selectionMode = false;
+    routeEditMode = false;
+    autoReturnMarking = false;
+    simStartMarking = false;
+    samplingMode = true;
+    map.setDefaultCursor("crosshair");
+    alert("采样点模式：点击航点标记采样点，再次点击可取消。");
+}
+
+function applySamplingPoints(points, opts) {
+    samplingPoints = [];
+    const markers = getSamplingTargetMarkers();
+    const targetCount = markers.length;
+    if (!targetCount) {
+        return;
+    }
+    (points || []).forEach(function(p) {
+        const idx = (typeof p.pointIndex === "number") ? (p.pointIndex - 1)
+                    : (typeof p.index === "number" ? p.index : -1);
+        if (idx < 0 || idx >= targetCount)
+            return;
+        samplingPoints.push(normalizeSamplingPoint({
+            index: idx,
+            lng: p.lng,
+            lat: p.lat,
+            order: p.order,
+            pointIndex: p.pointIndex || (idx + 1),
+            site: p.site,
+            bottle: p.bottle,
+            volume: p.volume,
+            depth: p.depth,
+            time: p.time,
+            env: p.env
+        }, idx));
+    });
+    updateSamplingVisual();
+    if (opts && opts.skipNotify) {
+        return;
+    }
+    pushSamplingSelectionToQml();
+}
+
+function ensureSamplingInfoWindow() {
+    if (!samplingInfoWindow) {
+        samplingInfoWindow = new AMap.InfoWindow({
+            offset: new AMap.Pixel(0, -30),
+            autoMove: true
+        });
+    }
+    return samplingInfoWindow;
+}
+
+function formatSamplingInfo(sp, fallbackIndex) {
+    if (!sp) {
+        return "采样点 " + (fallbackIndex + 1);
+    }
+    const order = sp.order || sp.pointIndex || (fallbackIndex + 1);
+    const site = sp.site || sp.pointIndex || (fallbackIndex + 1);
+    const bottle = (typeof sp.bottle === "number") ? sp.bottle : "";
+    const volume = (typeof sp.volume === "number") ? sp.volume : "";
+    const depth = (typeof sp.depth === "number") ? sp.depth : "";
+    const lng = (typeof sp.lng === "number") ? sp.lng : null;
+    const lat = (typeof sp.lat === "number") ? sp.lat : null;
+    let html = `<b>采样点 ${order}</b><br>`;
+    html += `位点: ${site}<br>`;
+    if (bottle !== "") html += `瓶号: ${bottle}<br>`;
+    if (volume !== "") html += `容量: ${volume} L<br>`;
+    if (depth !== "") html += `深度: ${depth} m<br>`;
+    if (lng !== null && lat !== null) {
+        html += `坐标: ${lng.toFixed(5)}, ${lat.toFixed(5)}<br>`;
+    }
+    if (sp.env)
+        html += formatEnvironmentInfo(sp.env);
+    if (sp.time) html += `时间: ${sp.time}`;
+    return html;
+}
+
+function attachSamplingHover(marker) {
+    if (!marker) return;
+    if (!marker.__hoverBound) {
+        marker.on("mouseover", function() {
+            const sp = marker.__samplingData;
+            if (!sp) return;
+            const idx = sp && typeof sp.index === "number" ? sp.index : 0;
+            const info = ensureSamplingInfoWindow();
+            const content = formatSamplingInfo(sp, idx);
+            info.setContent(content);
+            info.open(map, marker.getPosition());
+        });
+        marker.on("mouseout", function() {
+            if (samplingInfoWindow) samplingInfoWindow.close();
+        });
+        marker.__hoverBound = true;
+    }
+}
+
+function setManualStatus(text) {
+    if (manualLastStatus === text)
+        return;
+    manualLastStatus = text;
+    notifyBoatStatus(text);
+}
+
+function updateManualStatus(pos) {
+    let status = "正在手动操纵";
+    const routePts = getCurrentRoutePoints();
+    if (routePts.length) {
+        let bestIdx = -1;
+        let bestDist = 1e12;
+        for (let i = 0; i < routePts.length; ++i) {
+            const d = distanceMeters(pos, routePts[i]);
+            if (d < bestDist) {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+        if (bestIdx >= 0 && bestDist <= MANUAL_WAYPOINT_NEARBY_DISTANCE_METERS) {
+            status = "行驶至" + (bestIdx + 1) + "号航点附近";
+        }
+    }
+    setManualStatus(status);
+}
+
+// 右键菜单渲染
+function showContextMenu(x, y, onMarker) {
+    contextMenu.style.left = x + "px";
+    contextMenu.style.top = y + "px";
+
+    if (!routeEditMode) {
+        let simItem = `<li onclick="startSimFollowRoute()">🧭 启动模拟船</li>`;
+        if (simTimer) {
+            if (simPaused) {
+                simItem = `
+                    <li onclick="resumeSimFollowRoute()">▶ 继续模拟船</li>
+                    <li onclick="stopSimFollowRoute()">⏹ 停止模拟船</li>
+                `;
+            } else {
+                simItem = `
+                    <li onclick="pauseSimFollowRoute()">⏸ 暂停模拟船</li>
+                    <li onclick="stopSimFollowRoute()">⏹ 停止模拟船</li>
+                `;
+            }
+        }
+        contextMenu.innerHTML = `
+            <li onclick="startRouteEdit()">🚩 设置航线</li>
+            ${simItem}
+        `;
+    } else {
+        let simItem = `<li onclick="startSimFollowRoute()">🧭 启动模拟船</li>`;
+        if (simTimer) {
+            if (simPaused) {
+                simItem = `
+                    <li onclick="resumeSimFollowRoute()">▶ 继续模拟船</li>
+                    <li onclick="stopSimFollowRoute()">⏹ 停止模拟船</li>
+                `;
+            } else {
+                simItem = `
+                    <li onclick="pauseSimFollowRoute()">⏸ 暂停模拟船</li>
+                    <li onclick="stopSimFollowRoute()">⏹ 停止模拟船</li>
+                `;
+            }
+        }
+        contextMenu.innerHTML = `
+            <li onclick="saveRoute()">✔ 保存航线</li>
+            ${simItem}
+            <li onclick="discardRoute()">✖ 放弃航线</li>
+        `;
+    }
+
+    // 在 marker 上右键时，直接显示放弃/保存
+    if (onMarker) {
+        let simItem = `<li onclick="startSimFollowRoute()">🧭 启动模拟船</li>`;
+        if (simTimer) {
+            if (simPaused) {
+                simItem = `
+                    <li onclick="resumeSimFollowRoute()">▶ 继续模拟船</li>
+                    <li onclick="stopSimFollowRoute()">⏹ 停止模拟船</li>
+                `;
+            } else {
+                simItem = `
+                    <li onclick="pauseSimFollowRoute()">⏸ 暂停模拟船</li>
+                    <li onclick="stopSimFollowRoute()">⏹ 停止模拟船</li>
+                `;
+            }
+        }
+        contextMenu.innerHTML = `
+            <li onclick="saveRoute()">✔ 保存航线</li>
+            ${simItem}
+            <li onclick="discardRoute()">✖ 放弃航线</li>
+        `;
+    }
+
+    contextMenu.style.display = "block";
+}
+
+// -------------------------------
+// 统一清空：航线/规划/返航/模拟覆盖物
+// -------------------------------
+function clearAllRoutes() {
+    clearRoute();               // 航线编辑
+    clearPlanningGraphics();    // 规划点/线
+    clearAutoReturnPath();      // 返航相关
+    stopSimFollowRoute();       // 模拟船
+    stopManualControl();        // 手动模式
+    selectionMode = false;
+    routeEditMode = false;
+    autoReturnMarking = false;
+    contextMenu.style.display = "none";
+}
+
+
+// -------------------------------
+// 6. 航线显示开关
+// -------------------------------
+routeVisible = true;
+document.getElementById("toggleRoadNetBtn").innerText = "显示航线：开启";
+document.getElementById("toggleRoadNetBtn").onclick = function () {
+    routeVisible = !routeVisible;
+    applyRouteVisibility();
+};
+
+document.getElementById("clearRoutesBtn").onclick = function () {
+    clearAllRoutes();
+};
+
+document.getElementById("locateBtn").onclick = function () {
+    locateCurrentPosition();
+};
+
+// WebChannel: 获取 RouteSaver / RoutePlanner
+if (typeof qt !== "undefined") {
+    new QWebChannel(qt.webChannelTransport, function(channel) {
+        window.RouteSaver = channel.objects.RouteSaver;
+        window.RoutePlanner = channel.objects.RoutePlanner;
+        window.NativeLocator = channel.objects.NativeLocator;
+        window.SamplingTaskBridge = channel.objects.SamplingTaskBridge;
+        window.EnvironmentData = channel.objects.EnvironmentData;
+        if (window.NativeLocator && window.NativeLocator.locationUpdated && typeof window.NativeLocator.locationUpdated.connect === "function") {
+            try {
+                window.NativeLocator.locationUpdated.connect(function(lng, lat) {
+                    debug("原生定位回调 lng=" + lng + ", lat=" + lat);
+                    updateLocationMarker(lng, lat);
+                });
+            } catch (e) {
+                console.log("NativeLocator connect failed:", e);
+            }
+        }
+        window.BoatLocation = channel.objects.BoatLocation;
+        if (window.BoatLocation && window.BoatLocation.locationUpdated && typeof window.BoatLocation.locationUpdated.connect === "function") {
+            try {
+                window.BoatLocation.locationUpdated.connect(function(lng, lat, heading) {
+                    lastBoatLocation = { lng: lng, lat: lat, heading: heading };
+                    debug("船载GPS定位 lng=" + lng + ", lat=" + lat);
+                    updateLocationMarker(lng, lat);
+                });
+            } catch (e) {
+                console.log("BoatLocation connect failed:", e);
+            }
+        }
+        if (window.BoatLocation && window.BoatLocation.statusChanged && typeof window.BoatLocation.statusChanged.connect === "function") {
+            try {
+                window.BoatLocation.statusChanged.connect(function(status) {
+                    debug("船载定位状态: " + status);
+                });
+            } catch (e) {
+                console.log("BoatLocation status connect failed:", e);
+            }
+        }
+        console.log("WebChannel connected (HTML side)");
+    });
+} else {
+    console.log("qt object missing: WebChannel not available");
+}
+
+</script>
+
+</body>
+</html>

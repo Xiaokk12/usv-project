@@ -1,0 +1,8 @@
+<RCC>
+  <qresource prefix="/">
+      <file>Main.qml</file>
+      <file>RouteAutoPlanner.js</file>
+      <file>map_gaode.html</file>
+      <file>ship.png</file>
+  </qresource>
+</RCC>
