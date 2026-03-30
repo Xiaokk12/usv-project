@@ -1,7 +1,10 @@
-# Backend (Task0 Minimal State Machine)
+# Backend
 
-最小可运行后端状态机骨架：没接 UI、没接网络、没接仿真器。  
-功能仅包含：事件队列 + 状态机流转 + Action/Snapshot 输出。
+当前后端包含两部分：
+- `BackendEngine`：最小可运行状态机核心
+- `backend_app`：基于 TCP 的轻量服务端，可部署在树莓派
+
+功能包含：事件队列 + 状态机流转 + Action/Snapshot 输出 + TCP 命令/快照收发。
 
 ## Features
 - 两层状态：SystemState + MissionState
@@ -41,10 +44,40 @@ cmake --build build/backend -j
 ```
 
 ## Run
+
+### Demo 模式
+本地演示状态机自动打印：
+
 ```bash
-./build/backend/backend_app
+./build/backend/backend_app --demo
+```
+
+### TCP 服务端模式
+默认启动 TCP 服务端，监听 `45454` 端口，供 Mac 上位机连接：
+
+```bash
+./build/backend/backend_app --port 45454
+```
+
+启动后会看到：
+
+```text
+[NET] backend_app listening on 0.0.0.0:45454
+```
+
+联调时：
+- 上位机发送 `CMD ...`、`TICK`、`TEL_*` 到树莓派
+- 后端在树莓派上处理状态机
+- 后端回传 `SNAPSHOT ...` 给上位机
+- 树莓派终端继续打印 `[STATE] ...`
+
+## Test
+```bash
+ctest --test-dir build/backend --output-on-failure
 ```
 
 ## Notes
-- 代码仅为 Task0 骨架，方便未来接入 HTTP/WebSocket 或 Simulator/Adapter。
-- 状态转移清晰可扩展，当前流程使用定时 tick 驱动。
+- 状态机核心在 [backend/src/BackendEngine.cpp](/Users/xiaokk/Projects/usv_project/backend/src/BackendEngine.cpp)。
+- TCP 协议编解码在 [backend/src/BackendProtocol.h](/Users/xiaokk/Projects/usv_project/backend/src/BackendProtocol.h)。
+- 服务端入口在 [backend/src/main.cpp](/Users/xiaokk/Projects/usv_project/backend/src/main.cpp)。
+- 当前通信协议是轻量文本协议，目的是先打通 Mac 上位机和树莓派后端的小通路，后续可以替换成更正式的 HTTP/WebSocket/ROS 接口。
