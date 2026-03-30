@@ -1,4 +1,5 @@
 #include "BackendEngine.h"
+#include "BackendProtocol.h"
 
 #include <algorithm>
 #include <iostream>
@@ -7,60 +8,6 @@
 namespace usv::backend {
 
 namespace {
-
-const char* toString(SystemState s) {
-    switch (s) {
-    case SystemState::BOOT: return "BOOT";
-    case SystemState::IDLE: return "IDLE";
-    case SystemState::MANUAL: return "MANUAL";
-    case SystemState::AUTO_NAV: return "AUTO_NAV";
-    case SystemState::MISSION: return "MISSION";
-    case SystemState::RETURN_HOME: return "RETURN_HOME";
-    case SystemState::PAUSED: return "PAUSED";
-    case SystemState::FAULT: return "FAULT";
-    case SystemState::SHUTDOWN: return "SHUTDOWN";
-    }
-    return "UNKNOWN";
-}
-
-const char* toString(MissionState s) {
-    switch (s) {
-    case MissionState::NONE: return "NONE";
-    case MissionState::INIT: return "INIT";
-    case MissionState::GOTO_WP: return "GOTO_WP";
-    case MissionState::PREP: return "PREP";
-    case MissionState::RINSE: return "RINSE";
-    case MissionState::SAMPLE: return "SAMPLE";
-    case MissionState::POST: return "POST";
-    case MissionState::NEXT: return "NEXT";
-    case MissionState::DONE: return "DONE";
-    case MissionState::ABORTED: return "ABORTED";
-    case MissionState::FAILED: return "FAILED";
-    }
-    return "UNKNOWN";
-}
-
-const char* toString(CommandType cmd) {
-    switch (cmd) {
-    case CommandType::CMD_START: return "CMD_START";
-    case CommandType::CMD_STOP: return "CMD_STOP";
-    case CommandType::CMD_SET_MANUAL: return "CMD_SET_MANUAL";
-    case CommandType::CMD_SET_AUTO: return "CMD_SET_AUTO";
-    case CommandType::CMD_UPLOAD_ROUTE: return "CMD_UPLOAD_ROUTE";
-    case CommandType::CMD_START_MISSION: return "CMD_START_MISSION";
-    case CommandType::CMD_PAUSE: return "CMD_PAUSE";
-    case CommandType::CMD_RESUME: return "CMD_RESUME";
-    case CommandType::CMD_ABORT: return "CMD_ABORT";
-    case CommandType::CMD_RETURN_HOME: return "CMD_RETURN_HOME";
-    case CommandType::CMD_MISSION_REACHED_WAYPOINT: return "CMD_MISSION_REACHED_WAYPOINT";
-    case CommandType::CMD_MISSION_PREP_DONE: return "CMD_MISSION_PREP_DONE";
-    case CommandType::CMD_MISSION_RINSE_DONE: return "CMD_MISSION_RINSE_DONE";
-    case CommandType::CMD_MISSION_SAMPLE_DONE: return "CMD_MISSION_SAMPLE_DONE";
-    case CommandType::CMD_MISSION_POST_DONE: return "CMD_MISSION_POST_DONE";
-    case CommandType::CMD_RETURN_HOME_DONE: return "CMD_RETURN_HOME_DONE";
-    }
-    return "UNKNOWN";
-}
 
 bool snapshotChanged(const Snapshot& before, const Snapshot& after) {
     return before.system != after.system
@@ -73,12 +20,12 @@ void logSnapshotChange(const Snapshot& before, const Snapshot& after) {
     std::cout << "[STATE]";
     bool appended = false;
     if (before.system != after.system) {
-        std::cout << " System: " << toString(before.system) << " -> " << toString(after.system);
+        std::cout << " System: " << protocol::toString(before.system) << " -> " << protocol::toString(after.system);
         appended = true;
     }
     if (before.mission != after.mission) {
-        std::cout << (appended ? " |" : "") << " Mission: " << toString(before.mission)
-                  << " -> " << toString(after.mission);
+        std::cout << (appended ? " |" : "") << " Mission: " << protocol::toString(before.mission)
+                  << " -> " << protocol::toString(after.mission);
         appended = true;
     }
     if (before.current_waypoint != after.current_waypoint) {
@@ -134,9 +81,9 @@ std::vector<Action> BackendEngine::step() {
         logSnapshotChange(before, snapshot_);
     } else if (std::holds_alternative<CommandEvent>(evt.payload)) {
         const auto& cmd = std::get<CommandEvent>(evt.payload);
-        std::cout << "[STATE] No transition for " << toString(cmd.type)
-                  << " (system=" << toString(snapshot_.system)
-                  << ", mission=" << toString(snapshot_.mission) << ")\n";
+        std::cout << "[STATE] No transition for " << protocol::toString(cmd.type)
+                  << " (system=" << protocol::toString(snapshot_.system)
+                  << ", mission=" << protocol::toString(snapshot_.mission) << ")\n";
     }
 
     return actions;

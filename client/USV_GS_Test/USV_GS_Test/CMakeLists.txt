@@ -4,7 +4,7 @@ project(USV_GS_Test VERSION 0.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Quick WebEngineQuick WebChannel Positioning)
+find_package(Qt6 REQUIRED COMPONENTS Quick WebEngineQuick WebChannel Positioning Network)
 
 qt_standard_project_setup(REQUIRES 6.5)
 
@@ -58,6 +58,7 @@ target_link_libraries(appUSV_GS_Test
             Qt6::WebEngineQuick
             Qt6::WebChannel
             Qt6::Positioning
+            Qt6::Network
 )
 
 target_include_directories(appUSV_GS_Test PRIVATE

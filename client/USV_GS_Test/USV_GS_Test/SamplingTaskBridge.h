@@ -2,10 +2,12 @@
 #define SAMPLINGTASKBRIDGE_H
 
 #include <QObject>
+#include <QTcpSocket>
 #include <QString>
 #include <QTimer>
 
 #include "BackendEngine.h"
+#include "BackendProtocol.h"
 
 class SamplingTaskBridge : public QObject
 {
@@ -96,10 +98,15 @@ signals:
     void missionParametersChanged();
 
 private:
+    void publishSnapshot(const usv::backend::Snapshot& snapshot);
+    void publishSnapshot();
     void sendCommand(usv::backend::CommandType type);
     void sendTelemetry(const usv::backend::TelemetryEvent& tel);
+    void sendRemoteLine(const QString& line);
     void onTick();
-    void publishSnapshot();
+    void onSocketConnected();
+    void onSocketDisconnected();
+    void onSocketReadyRead();
     void updateMissionParameters(int bottle, double volume, double depth, int site);
 
     static QString toQString(usv::backend::SystemState state);
@@ -108,6 +115,11 @@ private:
 
     usv::backend::BackendEngine engine_{};
     QTimer tickTimer_{};
+    QTcpSocket socket_{};
+    QByteArray socketBuffer_{};
+    bool useRemoteBackend_{false};
+    QString remoteHost_{};
+    quint16 remotePort_{45454};
     QString systemState_{};
     QString missionState_{};
     QString statusSummary_{};

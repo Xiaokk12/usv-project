@@ -2,12 +2,30 @@
 
 #include <algorithm>
 #include <chrono>
+#include <QDebug>
 
 using namespace usv::backend;
 
 SamplingTaskBridge::SamplingTaskBridge(QObject *parent)
     : QObject(parent)
 {
+    const QString host = qEnvironmentVariable("USV_BACKEND_HOST").trimmed();
+    if (!host.isEmpty()) {
+        useRemoteBackend_ = true;
+        remoteHost_ = host;
+        bool ok = false;
+        const int parsedPort = qEnvironmentVariableIntValue("USV_BACKEND_PORT", &ok);
+        remotePort_ = ok ? static_cast<quint16>(parsedPort) : static_cast<quint16>(45454);
+        connect(&socket_, &QTcpSocket::connected, this, &SamplingTaskBridge::onSocketConnected);
+        connect(&socket_, &QTcpSocket::disconnected, this, &SamplingTaskBridge::onSocketDisconnected);
+        connect(&socket_, &QTcpSocket::readyRead, this, &SamplingTaskBridge::onSocketReadyRead);
+        connect(&socket_, &QTcpSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
+            lastError_ = socket_.errorString();
+            emit snapshotChanged();
+        });
+        socket_.connectToHost(remoteHost_, remotePort_);
+    }
+
     tickTimer_.setInterval(100);
     connect(&tickTimer_, &QTimer::timeout, this, &SamplingTaskBridge::onTick);
     tickTimer_.start();
@@ -73,10 +91,8 @@ static QString makeBoolLabel(bool value, const QString& okText, const QString& b
     return value ? okText : badText;
 }
 
-void SamplingTaskBridge::publishSnapshot()
+void SamplingTaskBridge::publishSnapshot(const Snapshot& snapshot)
 {
-    const Snapshot& snapshot = engine_.snapshot();
-
     const QString nextSystemState = toQString(snapshot.system);
     const QString nextMissionState = toQString(snapshot.mission);
     const QString nextStatusSummary = composeStatusSummary(snapshot);
@@ -175,8 +191,17 @@ void SamplingTaskBridge::publishSnapshot()
     emit autoStatusUpdated(missionBottle_, missionVolume_, missionDepth_, missionSite_, statusSummary_);
 }
 
+void SamplingTaskBridge::publishSnapshot()
+{
+    publishSnapshot(engine_.snapshot());
+}
+
 void SamplingTaskBridge::sendCommand(CommandType type)
 {
+    if (useRemoteBackend_) {
+        sendRemoteLine(QStringLiteral("CMD %1").arg(QString::fromLatin1(protocol::toString(type))));
+        return;
+    }
     engine_.enqueue({std::chrono::steady_clock::now(), CommandEvent{type}});
     engine_.step();
     publishSnapshot();
@@ -184,16 +209,100 @@ void SamplingTaskBridge::sendCommand(CommandType type)
 
 void SamplingTaskBridge::sendTelemetry(const TelemetryEvent& tel)
 {
+    if (useRemoteBackend_) {
+        switch (tel.type) {
+        case TelemetryType::TEL_POSE:
+            sendRemoteLine(QStringLiteral("TEL_POSE %1 %2 %3 %4")
+                               .arg(tel.pose.latitude, 0, 'g', 10)
+                               .arg(tel.pose.longitude, 0, 'g', 10)
+                               .arg(tel.pose.heading_deg, 0, 'g', 10)
+                               .arg(tel.pose.speed_mps, 0, 'g', 10));
+            break;
+        case TelemetryType::TEL_HEALTH:
+            sendRemoteLine(QStringLiteral("TEL_HEALTH %1 %2 %3 %4")
+                               .arg(tel.health.gnss_ok ? 1 : 0)
+                               .arg(tel.health.motor_ok ? 1 : 0)
+                               .arg(tel.health.rudder_ok ? 1 : 0)
+                               .arg(tel.health.sampler_ok ? 1 : 0));
+            break;
+        case TelemetryType::TEL_BATTERY:
+            sendRemoteLine(QStringLiteral("TEL_BATTERY %1").arg(tel.battery.soc, 0, 'g', 10));
+            break;
+        case TelemetryType::TEL_SAMPLER_STATUS:
+            sendRemoteLine(QStringLiteral("TEL_SAMPLER %1 %2 %3 %4")
+                               .arg(tel.sampler.winch_ready ? 1 : 0)
+                               .arg(tel.sampler.pump_ready ? 1 : 0)
+                               .arg(tel.sampler.rinsing ? 1 : 0)
+                               .arg(tel.sampler.sampling ? 1 : 0));
+            break;
+        }
+        return;
+    }
     engine_.enqueue({std::chrono::steady_clock::now(), tel});
     engine_.step();
     publishSnapshot();
 }
 
+void SamplingTaskBridge::sendRemoteLine(const QString& line)
+{
+    if (!useRemoteBackend_ || socket_.state() != QAbstractSocket::ConnectedState) {
+        return;
+    }
+    socket_.write(line.toUtf8());
+    socket_.write("\n");
+    socket_.flush();
+}
+
 void SamplingTaskBridge::onTick()
 {
+    if (useRemoteBackend_) {
+        sendRemoteLine(QStringLiteral("TICK"));
+        return;
+    }
     engine_.enqueue({std::chrono::steady_clock::now(), TimerEvent{TimerType::TICK}});
     engine_.step();
     publishSnapshot();
+}
+
+void SamplingTaskBridge::onSocketConnected()
+{
+    qInfo() << "[RemoteBackend] connected to" << remoteHost_ << remotePort_;
+    lastError_.clear();
+    emit snapshotChanged();
+    sendRemoteLine(QStringLiteral("ROUTE %1").arg(std::max(1, routePointCount_)));
+    updateHealthStatus(gnssOk_, motorOk_, rudderOk_, samplerOk_);
+    updateSamplerStatus(winchReady_, pumpReady_, rinsing_, sampling_);
+}
+
+void SamplingTaskBridge::onSocketDisconnected()
+{
+    qWarning() << "[RemoteBackend] disconnected";
+    lastError_ = QStringLiteral("backend disconnected");
+    emit snapshotChanged();
+}
+
+void SamplingTaskBridge::onSocketReadyRead()
+{
+    socketBuffer_.append(socket_.readAll());
+    while (true) {
+        const int newlineIndex = socketBuffer_.indexOf('\n');
+        if (newlineIndex < 0) {
+            break;
+        }
+
+        QByteArray line = socketBuffer_.left(newlineIndex);
+        socketBuffer_.remove(0, newlineIndex + 1);
+        if (!line.isEmpty() && line.endsWith('\r')) {
+            line.chop(1);
+        }
+
+        Snapshot snapshot{};
+        if (!protocol::decodeSnapshotLine(line.toStdString(), &snapshot)) {
+            qWarning() << "[RemoteBackend] ignored line:" << line;
+            continue;
+        }
+        publishSnapshot(snapshot);
+    }
 }
 
 void SamplingTaskBridge::updateMissionParameters(int bottle, double volume, double depth, int site)
@@ -303,8 +412,12 @@ void SamplingTaskBridge::setRoutePointCount(int count)
     const int nextCount = std::max(1, count);
     bool changed = routePointCount_ != nextCount;
     routePointCount_ = nextCount;
-    engine_.setRouteSize(count);
-    publishSnapshot();
+    if (useRemoteBackend_) {
+        sendRemoteLine(QStringLiteral("ROUTE %1").arg(nextCount));
+    } else {
+        engine_.setRouteSize(count);
+        publishSnapshot();
+    }
     if (changed) {
         emit snapshotChanged();
     }
