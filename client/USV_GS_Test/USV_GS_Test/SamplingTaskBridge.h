@@ -6,8 +6,12 @@
 #include <QString>
 #include <QTimer>
 
+#include <chrono>
+#include <vector>
+
 #include "BackendEngine.h"
 #include "BackendProtocol.h"
+#include "MockHardware.h"
 
 class SamplingTaskBridge : public QObject
 {
@@ -102,6 +106,9 @@ private:
     void publishSnapshot();
     void sendCommand(usv::backend::CommandType type);
     void sendTelemetry(const usv::backend::TelemetryEvent& tel);
+    void processLocalActions(const std::vector<usv::backend::Action>& actions,
+                             const std::chrono::steady_clock::time_point& now);
+    void processLocalHardware(const std::chrono::steady_clock::time_point& now);
     void sendRemoteLine(const QString& line);
     void onTick();
     void onSocketConnected();
@@ -114,6 +121,7 @@ private:
     QString composeStatusSummary(const usv::backend::Snapshot& snapshot) const;
 
     usv::backend::BackendEngine engine_{};
+    usv::backend::MockHardware hardware_{};
     QTimer tickTimer_{};
     QTcpSocket socket_{};
     QByteArray socketBuffer_{};

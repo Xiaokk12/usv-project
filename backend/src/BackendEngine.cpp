@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <type_traits>
 
 namespace usv::backend {
@@ -38,6 +39,12 @@ void logSnapshotChange(const Snapshot& before, const Snapshot& after) {
                   << (after.last_error.empty() ? "none" : after.last_error);
     }
     std::cout << "\n";
+}
+
+void appendActions(std::vector<Action>& target, std::vector<Action> source) {
+    target.insert(target.end(),
+                  std::make_move_iterator(source.begin()),
+                  std::make_move_iterator(source.end()));
 }
 
 } // namespace
@@ -96,6 +103,7 @@ std::vector<Action> BackendEngine::handleCommand(const CommandEvent& cmd,
     case CommandType::CMD_START:
         if (snapshot_.system == SystemState::BOOT) {
             snapshot_.system = SystemState::IDLE;
+            actions.push_back({ActionType::ACT_QUERY_STATUS, "Query hardware status", 0.0, 0});
         }
         break;
     case CommandType::CMD_SET_MANUAL:
@@ -116,7 +124,7 @@ std::vector<Action> BackendEngine::handleCommand(const CommandEvent& cmd,
             snapshot_.system = SystemState::MISSION;
             snapshot_.current_waypoint = 0;
             snapshot_.last_error.clear();
-            enterMissionState(MissionState::GOTO_WP, ts);
+            appendActions(actions, enterMissionState(MissionState::GOTO_WP, ts));
         }
         break;
     case CommandType::CMD_PAUSE:
@@ -133,32 +141,36 @@ std::vector<Action> BackendEngine::handleCommand(const CommandEvent& cmd,
         snapshot_.system = SystemState::RETURN_HOME;
         snapshot_.mission = MissionState::ABORTED;
         stage_start_ = ts;
+        actions.push_back({ActionType::ACT_EMERGENCY_STOP, "Emergency stop before return home", 0.0, snapshot_.current_waypoint});
+        actions.push_back({ActionType::ACT_RETURN_HOME, "Abort return home", 0.0, snapshot_.current_waypoint});
         break;
     case CommandType::CMD_RETURN_HOME:
         snapshot_.system = SystemState::RETURN_HOME;
         stage_start_ = ts;
+        actions.push_back({ActionType::ACT_RETURN_HOME, "Return home requested", 0.0, snapshot_.current_waypoint});
         break;
     case CommandType::CMD_STOP:
         snapshot_.system = SystemState::SHUTDOWN;
+        actions.push_back({ActionType::ACT_EMERGENCY_STOP, "System stop", 0.0, snapshot_.current_waypoint});
         break;
     case CommandType::CMD_MISSION_REACHED_WAYPOINT:
         if (snapshot_.system == SystemState::MISSION && snapshot_.mission == MissionState::GOTO_WP) {
-            enterMissionState(MissionState::PREP, ts);
+            appendActions(actions, enterMissionState(MissionState::PREP, ts));
         }
         break;
     case CommandType::CMD_MISSION_PREP_DONE:
         if (snapshot_.system == SystemState::MISSION && snapshot_.mission == MissionState::PREP) {
-            enterMissionState(MissionState::RINSE, ts);
+            appendActions(actions, enterMissionState(MissionState::RINSE, ts));
         }
         break;
     case CommandType::CMD_MISSION_RINSE_DONE:
         if (snapshot_.system == SystemState::MISSION && snapshot_.mission == MissionState::RINSE) {
-            enterMissionState(MissionState::SAMPLE, ts);
+            appendActions(actions, enterMissionState(MissionState::SAMPLE, ts));
         }
         break;
     case CommandType::CMD_MISSION_SAMPLE_DONE:
         if (snapshot_.system == SystemState::MISSION && snapshot_.mission == MissionState::SAMPLE) {
-            enterMissionState(MissionState::POST, ts);
+            appendActions(actions, enterMissionState(MissionState::POST, ts));
         }
         break;
     case CommandType::CMD_MISSION_POST_DONE:
@@ -166,10 +178,10 @@ std::vector<Action> BackendEngine::handleCommand(const CommandEvent& cmd,
             snapshot_.current_waypoint += 1;
             if (snapshot_.current_waypoint >= route_size_) {
                 snapshot_.system = SystemState::RETURN_HOME;
-                enterMissionState(MissionState::DONE, ts);
+                appendActions(actions, enterMissionState(MissionState::DONE, ts));
                 stage_start_ = ts;
             } else {
-                enterMissionState(MissionState::GOTO_WP, ts);
+                appendActions(actions, enterMissionState(MissionState::GOTO_WP, ts));
             }
         }
         break;
@@ -246,10 +258,34 @@ std::vector<Action> BackendEngine::handleTimer(const TimerEvent& tim,
     return actions;
 }
 
-void BackendEngine::enterMissionState(MissionState next,
-                                      const std::chrono::steady_clock::time_point& ts) {
+std::vector<Action> BackendEngine::enterMissionState(MissionState next,
+                                                     const std::chrono::steady_clock::time_point& ts) {
     snapshot_.mission = next;
     stage_start_ = ts;
+
+    switch (next) {
+    case MissionState::GOTO_WP:
+        return {{ActionType::ACT_GOTO_WAYPOINT, "Go to waypoint", 0.0, snapshot_.current_waypoint}};
+    case MissionState::PREP:
+        return {{ActionType::ACT_PREPARE_WATER_SAMPLING, "Prepare water sampling", 0.0, snapshot_.current_waypoint}};
+    case MissionState::RINSE:
+        return {{ActionType::ACT_START_RINSE, "Start rinse", 0.0, snapshot_.current_waypoint}};
+    case MissionState::SAMPLE:
+        return {{ActionType::ACT_START_SAMPLING, "Start sampling", 0.0, snapshot_.current_waypoint}};
+    case MissionState::POST:
+        return {{ActionType::ACT_POST_PROCESS, "Post process sampling", 0.0, snapshot_.current_waypoint}};
+    case MissionState::DONE:
+        return {{ActionType::ACT_RETURN_HOME, "Mission done return home", 0.0, snapshot_.current_waypoint}};
+    case MissionState::ABORTED:
+        return {{ActionType::ACT_EMERGENCY_STOP, "Mission aborted", 0.0, snapshot_.current_waypoint}};
+    case MissionState::FAILED:
+        return {{ActionType::ACT_EMERGENCY_STOP, "Mission failed", 0.0, snapshot_.current_waypoint}};
+    case MissionState::NONE:
+    case MissionState::INIT:
+    case MissionState::NEXT:
+        return {};
+    }
+    return {};
 }
 
 std::vector<Action> BackendEngine::missionTick(const std::chrono::steady_clock::time_point& ts) {

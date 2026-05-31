@@ -9,6 +9,7 @@ option(USV_BUILD_TESTS "Build backend tests" ON)
 
 add_library(usv_backend_core
     src/BackendEngine.cpp
+    src/MockHardware.cpp
 )
 
 target_include_directories(usv_backend_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

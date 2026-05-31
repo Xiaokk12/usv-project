@@ -29,7 +29,7 @@ private:
     std::vector<Action> handleTelemetry(const TelemetryEvent& tel);
     std::vector<Action> handleTimer(const TimerEvent& tim, const std::chrono::steady_clock::time_point& ts);
 
-    void enterMissionState(MissionState next, const std::chrono::steady_clock::time_point& ts);
+    std::vector<Action> enterMissionState(MissionState next, const std::chrono::steady_clock::time_point& ts);
     std::vector<Action> missionTick(const std::chrono::steady_clock::time_point& ts);
 
     std::queue<Event> queue_;

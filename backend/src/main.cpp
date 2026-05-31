@@ -1,5 +1,6 @@
 #include "BackendEngine.h"
 #include "BackendProtocol.h"
+#include "MockHardware.h"
 
 #include <arpa/inet.h>
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <thread>
+#include <utility>
 #include <unistd.h>
 
 using namespace usv::backend;
@@ -35,6 +37,27 @@ void printActions(const std::vector<Action>& actions) {
                   << " msg=" << (a.message.empty() ? "-" : a.message)
                   << " value=" << a.value
                   << " index=" << a.index << "\n";
+    }
+}
+
+void submitActions(BackendEngine& engine,
+                   MockHardware& hardware,
+                   const std::vector<Action>& actions,
+                   const std::chrono::steady_clock::time_point& now) {
+    if (!actions.empty()) {
+        printActions(actions);
+    }
+    for (const auto& action : actions) {
+        hardware.submit(action, engine.snapshot(), now);
+    }
+}
+
+void processHardwareEvents(BackendEngine& engine,
+                           MockHardware& hardware,
+                           const std::chrono::steady_clock::time_point& now) {
+    for (auto& event : hardware.tick(now)) {
+        engine.enqueue(std::move(event));
+        submitActions(engine, hardware, engine.step(), now);
     }
 }
 
@@ -88,6 +111,7 @@ bool sendLine(int fd, const std::string& line) {
 
 void runDemo() {
     BackendEngine engine;
+    MockHardware hardware;
     auto now = std::chrono::steady_clock::now();
 
     engine.enqueue({now, CommandEvent{CommandType::CMD_START}});
@@ -99,10 +123,8 @@ void runDemo() {
     for (int i = 0; i < 300; ++i) {
         const auto ts = std::chrono::steady_clock::now();
         engine.enqueue({ts, TimerEvent{TimerType::TICK}});
-        const auto actions = engine.step();
-        if (!actions.empty()) {
-            printActions(actions);
-        }
+        submitActions(engine, hardware, engine.step(), ts);
+        processHardwareEvents(engine, hardware, ts);
         printSnapshot(engine.snapshot());
         std::this_thread::sleep_for(tickInterval);
     }
@@ -126,7 +148,7 @@ std::optional<CommandEvent> parseCommandLine(const std::string& line) {
     return std::nullopt;
 }
 
-bool handleClientLine(BackendEngine& engine, const std::string& line) {
+bool handleClientLine(BackendEngine& engine, MockHardware& hardware, const std::string& line) {
     if (line.empty()) {
         return true;
     }
@@ -207,15 +229,14 @@ bool handleClientLine(BackendEngine& engine, const std::string& line) {
         return false;
     }
 
-    const auto actions = engine.step();
-    if (!actions.empty()) {
-        printActions(actions);
-    }
+    const auto now = std::chrono::steady_clock::now();
+    submitActions(engine, hardware, engine.step(), now);
     return true;
 }
 
 int runServer(uint16_t port) {
     BackendEngine engine;
+    MockHardware hardware;
     const int listenFd = createListenSocket(port);
     if (listenFd < 0) {
         return 1;
@@ -290,7 +311,7 @@ int runServer(uint16_t port) {
                     if (!line.empty() && line.back() == '\r') {
                         line.pop_back();
                     }
-                    if (!handleClientLine(engine, line)) {
+                    if (!handleClientLine(engine, hardware, line)) {
                         continue;
                     }
                     if (clientFd >= 0 && !sendLine(clientFd, protocol::encodeSnapshotLine(engine.snapshot()))) {
@@ -306,10 +327,8 @@ int runServer(uint16_t port) {
         const auto tickNow = std::chrono::steady_clock::now();
         while (tickNow >= nextTick) {
             engine.enqueue({tickNow, TimerEvent{TimerType::TICK}});
-            const auto actions = engine.step();
-            if (!actions.empty()) {
-                printActions(actions);
-            }
+            submitActions(engine, hardware, engine.step(), tickNow);
+            processHardwareEvents(engine, hardware, tickNow);
             if (clientFd >= 0 && !sendLine(clientFd, protocol::encodeSnapshotLine(engine.snapshot()))) {
                 std::cout << "[NET] failed to write tick snapshot to client\n";
                 ::close(clientFd);

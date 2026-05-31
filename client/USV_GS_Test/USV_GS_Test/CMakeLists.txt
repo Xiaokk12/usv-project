@@ -18,6 +18,7 @@ qt_add_executable(appUSV_GS_Test
     SamplingTaskBridge.cpp
     SamplingTaskBridge.h
     ../../../backend/src/BackendEngine.cpp
+    ../../../backend/src/MockHardware.cpp
     BoatLocationProvider.cpp
     BoatLocationProvider.h
     BoatSimulator.cpp

@@ -1,9 +1,11 @@
 #include "BackendEngine.h"
+#include "MockHardware.h"
 
 #include <cassert>
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace usv::backend;
@@ -24,6 +26,32 @@ std::vector<Action> processEvent(BackendEngine& engine,
                                  TimerType type) {
     engine.enqueue({ts, TimerEvent{type}});
     return engine.step();
+}
+
+void submitActions(BackendEngine& engine,
+                   MockHardware& hardware,
+                   const std::vector<Action>& actions,
+                   const Clock::time_point& ts) {
+    for (const auto& action : actions) {
+        hardware.submit(action, engine.snapshot(), ts);
+    }
+}
+
+void processEventWithHardware(BackendEngine& engine,
+                              MockHardware& hardware,
+                              const Clock::time_point& ts,
+                              CommandType type) {
+    submitActions(engine, hardware, processEvent(engine, ts, type), ts);
+}
+
+void tickWithHardware(BackendEngine& engine,
+                      MockHardware& hardware,
+                      const Clock::time_point& ts) {
+    submitActions(engine, hardware, processEvent(engine, ts, TimerType::TICK), ts);
+    for (auto& event : hardware.tick(ts)) {
+        engine.enqueue(std::move(event));
+        submitActions(engine, hardware, engine.step(), ts);
+    }
 }
 
 void expect(bool condition, const std::string& message) {
@@ -95,12 +123,36 @@ void testTimeoutFaultHandling() {
     expect(actions.front().type == ActionType::ACT_FAIL, "timeout action should be ACT_FAIL");
 }
 
+void testMockHardwareAutoProgression() {
+    BackendEngine engine;
+    MockHardware hardware;
+    const auto t0 = Clock::now();
+    engine.setRouteSize(1);
+
+    processEventWithHardware(engine, hardware, t0, CommandType::CMD_START);
+    processEventWithHardware(engine, hardware, t0, CommandType::CMD_SET_AUTO);
+    processEventWithHardware(engine, hardware, t0, CommandType::CMD_START_MISSION);
+
+    expect(engine.snapshot().system == SystemState::MISSION, "mock flow should start mission");
+    expect(engine.snapshot().mission == MissionState::GOTO_WP, "mock flow should start at GOTO_WP");
+
+    for (int i = 1; i <= 80; ++i) {
+        tickWithHardware(engine, hardware, t0 + std::chrono::milliseconds(100 * i));
+    }
+
+    expect(engine.snapshot().system == SystemState::IDLE, "mock flow should return to IDLE after auto return");
+    expect(engine.snapshot().mission == MissionState::NONE, "mock flow should clear mission after return home");
+    expect(engine.snapshot().current_waypoint == 1, "mock flow should complete the single waypoint");
+    expect(engine.snapshot().sampler.sampling == false, "mock flow should leave sampler stopped");
+}
+
 } // namespace
 
 int main() {
     testMissionProgression();
     testPauseAndResume();
     testTimeoutFaultHandling();
+    testMockHardwareAutoProgression();
     std::cout << "[PASS] backend_engine_tests\n";
     return 0;
 }

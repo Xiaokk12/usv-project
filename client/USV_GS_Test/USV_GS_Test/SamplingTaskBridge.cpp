@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <utility>
 #include <QDebug>
 
 using namespace usv::backend;
@@ -202,8 +203,9 @@ void SamplingTaskBridge::sendCommand(CommandType type)
         sendRemoteLine(QStringLiteral("CMD %1").arg(QString::fromLatin1(protocol::toString(type))));
         return;
     }
-    engine_.enqueue({std::chrono::steady_clock::now(), CommandEvent{type}});
-    engine_.step();
+    const auto now = std::chrono::steady_clock::now();
+    engine_.enqueue({now, CommandEvent{type}});
+    processLocalActions(engine_.step(), now);
     publishSnapshot();
 }
 
@@ -238,9 +240,26 @@ void SamplingTaskBridge::sendTelemetry(const TelemetryEvent& tel)
         }
         return;
     }
-    engine_.enqueue({std::chrono::steady_clock::now(), tel});
-    engine_.step();
+    const auto now = std::chrono::steady_clock::now();
+    engine_.enqueue({now, tel});
+    processLocalActions(engine_.step(), now);
     publishSnapshot();
+}
+
+void SamplingTaskBridge::processLocalActions(const std::vector<Action>& actions,
+                                             const std::chrono::steady_clock::time_point& now)
+{
+    for (const auto& action : actions) {
+        hardware_.submit(action, engine_.snapshot(), now);
+    }
+}
+
+void SamplingTaskBridge::processLocalHardware(const std::chrono::steady_clock::time_point& now)
+{
+    for (auto& event : hardware_.tick(now)) {
+        engine_.enqueue(std::move(event));
+        processLocalActions(engine_.step(), now);
+    }
 }
 
 void SamplingTaskBridge::sendRemoteLine(const QString& line)
@@ -259,8 +278,10 @@ void SamplingTaskBridge::onTick()
         sendRemoteLine(QStringLiteral("TICK"));
         return;
     }
-    engine_.enqueue({std::chrono::steady_clock::now(), TimerEvent{TimerType::TICK}});
-    engine_.step();
+    const auto now = std::chrono::steady_clock::now();
+    engine_.enqueue({now, TimerEvent{TimerType::TICK}});
+    processLocalActions(engine_.step(), now);
+    processLocalHardware(now);
     publishSnapshot();
 }
 
